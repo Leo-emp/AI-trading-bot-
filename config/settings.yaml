@@ -1,0 +1,61 @@
+# Trading pairs to monitor (highest liquidity, tightest spreads)
+pairs:
+  - BTC/USDT
+  - ETH/USDT
+  - SOL/USDT
+
+# Fee structure (Binance with BNB discount)
+fees:
+  maker_rate: 0.00075  # 0.075% per side
+  taker_rate: 0.001    # 0.1% per side (never used — limit only)
+  use_bnb_discount: true
+
+# Risk management
+risk:
+  max_open_positions: 3
+  max_daily_drawdown_pct: 5.0
+  max_consecutive_losses: 5
+  consecutive_loss_pause_minutes: 30
+  max_daily_trades: 25
+  min_balance_floor: 10.0
+  max_position_pct: 25.0
+  min_order_size: 10.0
+  black_swan_pct: 5.0
+  stale_data_seconds: 10
+  max_spread_pct: 0.15
+  time_exit_hours: 4
+
+# Auto-scaling tiers (keyed by minimum balance)
+scaling:
+  - min_balance: 20
+    max_risk_pct: 0.4
+    max_positions: 3
+    daily_trade_limit: 25
+  - min_balance: 100
+    max_risk_pct: 0.5
+    max_positions: 4
+    daily_trade_limit: 40
+  - min_balance: 500
+    max_risk_pct: 0.75
+    max_positions: 5
+    daily_trade_limit: 60
+  - min_balance: 2000
+    max_risk_pct: 1.0
+    max_positions: 6
+    daily_trade_limit: 80
+
+# Protection layers
+protection:
+  reduce_size_after_losses: 3
+  pause_after_losses: 5
+  defense_mode_drawdown_pct: 3.0
+  weekly_drawdown_reduce_pct: 10.0
+  monthly_drawdown_emergency_pct: 15.0
+  flash_crash_pct: 5.0
+  max_api_errors: 3
+
+# Scheduling
+schedule:
+  gemini_interval_minutes: 15
+  portfolio_snapshot_minutes: 60
+  daily_report_hour_utc: 0

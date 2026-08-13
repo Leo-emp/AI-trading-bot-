@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+*.db
+*.db-journal
+ml/models/*.pkl
+.venv/
+venv/
+backtest/data/
+trading_bot.log

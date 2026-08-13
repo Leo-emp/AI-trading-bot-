@@ -1,119 +1,189 @@
 # src/strategies/grid.py
-# Grid Trading Strategy — the sideways market earner.
+# Volatility Squeeze Strategy -- catches regime transitions.
 #
-# How it works:
-# - Places buy orders at intervals BELOW current price
-# - Places sell orders at intervals ABOVE current price
-# - When price bounces between levels, it catches profits
-# - ATR-based spacing adapts to current volatility
+# EVIDENCE (Bollinger Band Squeeze, widely documented):
+#   When BB width narrows significantly (low volatility), price is
+#   compressing -- building potential energy for a big move. When bands
+#   expand and price breaks out, a new trend is starting.
+#   John Bollinger himself recommends this as a primary strategy.
 #
-# Best in: ranging/sideways markets (60-70% of the time)
-# Worst in: strong trends (one side keeps getting hit)
+# HOW IT WORKS:
+#   1. DETECT SQUEEZE: min BB width in last 10 candles < 85% of BB width SMA
+#      (market was recently compressed, coiling for a move)
+#   2. DETECT EXPANSION: current BB width > previous AND approaching SMA
+#      (bands opening up = volatility returning = breakout beginning)
+#   3. TRADE DIRECTION: price above upper BB = long, below lower BB = short
+#   4. VOLUME + MACD + candle direction must confirm
 #
-# Grid spacing is dynamic:
-# - High volatility → wider grid (ATR * multiplier)
-# - Low volatility → tighter grid (minimum spacing)
+# WHEN IT FAILS:
+#   - False squeezes that re-compress (volume filter reduces these)
+#   - Breakout that immediately reverses (tight SL limits damage)
+#   - Very low volatility environments where squeeze never breaks
+#
+# SL: 0.5% | TP: 1.5% | R:R = 3:1 | Cooldown: 24 candles (2 hrs)
+#
+# Class name kept as GridStrategy for backward compatibility.
+# Internally this is a BB squeeze breakout strategy.
 
 import pandas as pd
 from src.strategies.base import BaseStrategy, StrategySignal
 
 
 class GridStrategy(BaseStrategy):
-    """ATR-based dynamic grid trading strategy.
 
-    Generates BUY signals when price drops to a grid level below,
-    SELL signals when price rises to a grid level above.
-    Grid spacing adapts to volatility using ATR.
-    """
+    def __init__(self):
+        super().__init__()
+        self._last_trade_call = -999
+        self._call_count = 0
 
     @property
     def name(self) -> str:
+        # Keep original name so config lookup and strategy selector still work
         return "grid"
 
     def evaluate(self, df: pd.DataFrame, config: dict) -> StrategySignal:
-        """Check if price has hit a grid level."""
-        if len(df) < 30:
+        if len(df) < 20:
             return StrategySignal("HOLD", 0.0, strategy_name=self.name,
                                   reasons=["insufficient data"])
 
         latest = df.iloc[-1]
         prev = df.iloc[-2]
-        close = latest["close"]
-        prev_close = prev["close"]
-        atr = latest.get("atr")
-        rsi = latest.get("rsi")
-        bb_width = latest.get("bb_width")
+        self._call_count += 1
 
-        if pd.isna(atr) or pd.isna(rsi) or atr <= 0:
+        # --- Cooldown: 24 candles (2 hours) between trades ---
+        # Squeeze breakouts need time to develop, prevents re-entry
+        cooldown = config.get("cooldown_candles", 24)
+        if self._call_count - self._last_trade_call < cooldown:
+            return StrategySignal("HOLD", 0.0, strategy_name=self.name,
+                                  reasons=["cooldown active"])
+
+        # --- Pull all indicator values ---
+        close = latest["close"]
+        open_price = latest["open"]
+        bb_upper = latest.get("bb_upper")
+        bb_lower = latest.get("bb_lower")
+        bb_middle = latest.get("bb_middle")
+        bb_width = latest.get("bb_width")
+        bb_width_sma = latest.get("bb_width_sma")
+        prev_bb_width = prev.get("bb_width")
+        vol_ratio = latest.get("volume_ratio")
+        macd_hist = latest.get("macd_histogram")
+
+        # Skip if indicators haven't warmed up
+        if any(pd.isna(v) for v in [bb_upper, bb_lower, bb_middle,
+                                     bb_width, bb_width_sma, prev_bb_width]):
             return StrategySignal("HOLD", 0.0, strategy_name=self.name,
                                   reasons=["indicators warming up"])
 
-        # Config
-        levels = config.get("levels", 5)
-        spacing_mult = config.get("spacing_atr_multiplier", 0.5)
-        min_spacing_pct = config.get("min_spacing_pct", 0.3) / 100
-        max_spacing_pct = config.get("max_spacing_pct", 2.0) / 100
-
-        # Calculate grid spacing based on ATR
-        spacing = atr * spacing_mult
-        spacing_pct = spacing / close if close > 0 else 0
-
-        # Clamp spacing to configured range
-        spacing_pct = max(min_spacing_pct, min(spacing_pct, max_spacing_pct))
-        spacing = close * spacing_pct
-
-        # Only trade in ranging markets (BB width narrow = low volatility)
-        # Skip grid in strong trends
-        if not pd.isna(bb_width) and bb_width > 0.06:
+        # ====== STEP 1: SQUEEZE DETECTION ======
+        # Check if BB width was recently compressed (below its own average).
+        # A squeeze means the market is coiling -- low volatility before a move.
+        # We check the minimum BB width in the last 10 candles vs the SMA.
+        lookback = min(10, len(df))
+        recent_bb = df["bb_width"].iloc[-lookback:]
+        valid_widths = recent_bb.dropna()
+        if len(valid_widths) < 3:
             return StrategySignal("HOLD", 0.0, strategy_name=self.name,
-                                  reasons=[f"BB too wide ({bb_width:.3f}), market trending"])
+                                  reasons=["not enough BB data"])
 
-        reasons = []
+        min_recent_bb = valid_widths.min()
+        # Squeeze = minimum BB width was at least 15% below the 20-period average
+        squeeze_ratio = config.get("squeeze_ratio", 0.85)
+        was_squeezed = min_recent_bb < bb_width_sma * squeeze_ratio
 
-        # BUY: price dropped through a grid level
-        # Price crossed below a grid line from above
-        price_drop = prev_close - close
-        if price_drop >= spacing * 0.8:
-            # Confirm with RSI — don't buy into freefall
-            if rsi < 65:
-                confidence = 0.55
-                # Stronger signal if RSI is also oversold
-                if rsi < 35:
-                    confidence = 0.75
-                    reasons.append(f"RSI oversold ({rsi:.0f})")
-                reasons.append(f"price dropped through grid ({price_drop:.2f} >= {spacing:.2f})")
-                reasons.append(f"grid spacing: {spacing_pct*100:.2f}% (ATR: {atr:.2f})")
+        if not was_squeezed:
+            return StrategySignal("HOLD", 0.0, strategy_name=self.name,
+                                  reasons=["no recent squeeze"])
 
-                sl_pct = spacing_pct * 2  # stop at 2 grid levels below
-                tp_pct = spacing_pct * 1.5  # TP at 1.5 grid levels above
-                return StrategySignal(
-                    direction="BUY", confidence=confidence,
-                    entry_price=close,
-                    stop_loss=round(close * (1 - sl_pct), 8),
-                    take_profit=round(close * (1 + tp_pct), 8),
-                    strategy_name=self.name, reasons=reasons,
-                )
+        # ====== STEP 2: EXPANSION DETECTION ======
+        # BB width must be RISING now (breaking out of the squeeze).
+        # Expanding bands = volatility returning = move starting.
+        is_expanding = bb_width > prev_bb_width and bb_width > bb_width_sma * 0.9
 
-        # SELL: price rose through a grid level
-        price_rise = close - prev_close
-        if price_rise >= spacing * 0.8:
-            if rsi > 35:
-                confidence = 0.55
-                if rsi > 65:
-                    confidence = 0.75
-                    reasons.append(f"RSI overbought ({rsi:.0f})")
-                reasons.append(f"price rose through grid ({price_rise:.2f} >= {spacing:.2f})")
-                reasons.append(f"grid spacing: {spacing_pct*100:.2f}% (ATR: {atr:.2f})")
+        if not is_expanding:
+            return StrategySignal("HOLD", 0.0, strategy_name=self.name,
+                                  reasons=["squeeze not expanding yet"])
 
-                sl_pct = spacing_pct * 2
-                tp_pct = spacing_pct * 1.5
-                return StrategySignal(
-                    direction="SELL", confidence=confidence,
-                    entry_price=close,
-                    stop_loss=round(close * (1 + sl_pct), 8),
-                    take_profit=round(close * (1 - tp_pct), 8),
-                    strategy_name=self.name, reasons=reasons,
-                )
+        # --- SL/TP from config ---
+        sl_pct = config.get("stop_loss_pct", 0.5) / 100  # 0.5%
+        tp_pct = config.get("take_profit_pct", 1.5) / 100  # 1.5%
+
+        # ====== STEP 3: DIRECTIONAL BREAKOUT ======
+        # Now that we have squeeze + expansion, determine which direction
+        buy_score = 0
+        sell_score = 0
+        buy_reasons = ["squeeze breakout"]
+        sell_reasons = ["squeeze breakout"]
+
+        # 1. Price position relative to Bollinger Bands (2 pts for clear break)
+        # Price above upper BB = bullish breakout from squeeze
+        if close > bb_upper:
+            buy_score += 2
+            buy_reasons.append("price above upper BB")
+        elif close > (bb_upper + bb_middle) / 2:
+            # Price in upper half of BB = leaning bullish
+            buy_score += 1
+            buy_reasons.append("price in upper BB zone")
+
+        # Price below lower BB = bearish breakout from squeeze
+        if close < bb_lower:
+            sell_score += 2
+            sell_reasons.append("price below lower BB")
+        elif close < (bb_lower + bb_middle) / 2:
+            sell_score += 1
+            sell_reasons.append("price in lower BB zone")
+
+        # 2. Candle direction confirms the breakout (1 point)
+        if close > open_price:
+            buy_score += 1
+            buy_reasons.append("bullish candle")
+        if close < open_price:
+            sell_score += 1
+            sell_reasons.append("bearish candle")
+
+        # 3. Volume confirms the move is real (1 point)
+        vol_min = config.get("volume_min", 1.2)
+        if not pd.isna(vol_ratio) and vol_ratio >= vol_min:
+            if buy_score > 0:
+                buy_score += 1
+                buy_reasons.append(f"volume {vol_ratio:.1f}x")
+            if sell_score > 0:
+                sell_score += 1
+                sell_reasons.append(f"volume {vol_ratio:.1f}x")
+
+        # 4. MACD momentum direction (1 point)
+        if not pd.isna(macd_hist):
+            if macd_hist > 0:
+                buy_score += 1
+                buy_reasons.append("MACD bullish")
+            if macd_hist < 0:
+                sell_score += 1
+                sell_reasons.append("MACD bearish")
+
+        # --- Need 3+ points: BB position (1-2) + direction confirmations ---
+        min_score = 3
+
+        if buy_score >= min_score and buy_score > sell_score:
+            confidence = min(buy_score / 5, 1.0)
+            self._last_trade_call = self._call_count
+            return StrategySignal(
+                direction="BUY", confidence=confidence,
+                entry_price=close,
+                stop_loss=round(close * (1 - sl_pct), 8),
+                take_profit=round(close * (1 + tp_pct), 8),
+                strategy_name=self.name, reasons=buy_reasons,
+            )
+
+        if sell_score >= min_score and sell_score > buy_score:
+            confidence = min(sell_score / 5, 1.0)
+            self._last_trade_call = self._call_count
+            return StrategySignal(
+                direction="SELL", confidence=confidence,
+                entry_price=close,
+                stop_loss=round(close * (1 + sl_pct), 8),
+                take_profit=round(close * (1 - tp_pct), 8),
+                strategy_name=self.name, reasons=sell_reasons,
+            )
 
         return StrategySignal("HOLD", 0.0, strategy_name=self.name,
-                              reasons=["price between grid levels"])
+                              reasons=["squeeze direction unclear"])

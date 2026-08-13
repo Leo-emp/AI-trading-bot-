@@ -13,10 +13,12 @@
 #    Brain 3: Gemini AI analysis (market conditions, sentiment)
 #    Brain 4: Multi-timeframe alignment (5m + 15m + 1h agree?)
 #    Brain 5: Cross-asset correlation (BTC trend affects alts)
-# 7. Trade Gate → 3/5 consensus required, veto on strong opposing
+# 7. Trade Gate → 4/5 consensus required, veto on strong opposing
 # 8. Risk validation → position sizing, SL/TP, balance check
-# 9. Execute → PaperTrader or live, with trailing stops
-# 10. Track performance → auto-disable losing strategies
+# 9. Adaptive sizing → increase on win streak, decrease on loss streak
+# 10. Execute → PaperTrader or live
+# 11. Smart exit → 4-phase exit (normal → breakeven → trail → tight trail)
+# 12. Track performance → auto-disable losing strategies
 #
 # The engine runs in a continuous loop until stopped.
 
@@ -36,6 +38,8 @@ from src.intelligence.gemini_brain import GeminiBrain
 from src.intelligence.multi_timeframe import MultiTimeframeBrain
 from src.intelligence.performance_tracker import PerformanceTracker
 from src.intelligence.strategy_selector import StrategySelector
+from src.intelligence.macro_calendar import MacroCalendar
+from src.intelligence.trade_filter import TradeFilter
 from src.risk.manager import RiskManager
 from src.risk.protection import ProtectionSystem
 from src.ai.trade_gate import TradeGate, BrainSignal
@@ -45,6 +49,8 @@ from src.strategies.momentum import MomentumStrategy
 from src.strategies.mean_reversion import MeanReversionStrategy
 from src.execution.paper_trader import PaperTrader
 from src.execution.trailing_stop import TrailingStopManager
+from src.execution.smart_exit import SmartExitManager
+from src.execution.adaptive_sizer import AdaptiveSizer
 from src.notifications.telegram import TelegramNotifier
 from src.storage.database import Database
 
@@ -82,6 +88,8 @@ class TradingEngine:
         self._gemini_brain = GeminiBrain()
         self._mtf_brain = MultiTimeframeBrain()
         self._performance_tracker = PerformanceTracker()
+        self._macro_calendar = MacroCalendar()
+        self._trade_filter = TradeFilter()
 
         # All 4 strategies
         self._strategies = {
@@ -104,6 +112,8 @@ class TradingEngine:
         # Execution
         self._trader = None
         self._trailing_stops = TrailingStopManager()
+        self._smart_exit = SmartExitManager()
+        self._adaptive_sizer = AdaptiveSizer()
 
         # Tracking
         self._cycle_count = 0
@@ -183,6 +193,13 @@ class TradingEngine:
             await self._db.save_trade(trade)
             # Record in performance tracker
             self._performance_tracker.record_trade(trade.strategy, trade.pnl)
+            # Feed adaptive sizer — bigger bets when winning, smaller when losing
+            if trade.pnl > 0:
+                self._adaptive_sizer.record_win()
+            else:
+                self._adaptive_sizer.record_loss()
+                # Tell trade filter to start cooldown (avoid revenge trades)
+                self._trade_filter.record_loss()
 
     async def _on_protection(self, **kwargs):
         await self._notifier.send_protection_alert(
@@ -228,6 +245,16 @@ class TradingEngine:
                     await asyncio.sleep(interval)
                     continue
 
+                # Step 1b: Check macro event calendar (Fed, CPI, NFP)
+                macro_status = self._macro_calendar.check()
+                if macro_status["should_pause"]:
+                    logger.warning("MACRO PAUSE: %s", macro_status["reason"])
+                    await self._event_bus.emit("protection_triggered",
+                                               layer="macro", action="PAUSE",
+                                               reason=macro_status["reason"])
+                    await asyncio.sleep(interval)
+                    continue
+
                 # Step 2: Process each pair
                 for pair in pairs:
                     await self._process_pair(pair, protection_status)
@@ -269,20 +296,40 @@ class TradingEngine:
             # Update correlation tracker
             self._correlation.update(pair, current_price)
 
-            # --- Step 2: Check open positions for SL/TP/trailing ---
+            # --- Step 2: Check open positions with SMART EXIT ---
+            # Smart exit replaces fixed TP — lets winners run further
             current_prices = {pair: current_price}
 
-            # Update trailing stops before checking positions
             for pos in self._trader.get_open_positions():
                 pos_id = f"{pos.pair}_{pos.entry_price}"
-                new_stop = self._trailing_stops.update(pos_id, current_price)
-                if new_stop and new_stop != pos.stop_loss:
-                    pos.stop_loss = new_stop  # update the position's SL
+
+                # Update smart exit (4-phase: normal → breakeven → trail → tight)
+                exit_state = self._smart_exit.update(pos_id, current_price)
+                if exit_state:
+                    # Smart exit updates the stop loss dynamically
+                    if exit_state.current_sl != pos.stop_loss:
+                        pos.stop_loss = exit_state.current_sl
+
+                    # Also update trailing stop manager as backup
+                    new_stop = self._trailing_stops.update(pos_id, current_price)
+                    if new_stop and new_stop > pos.stop_loss:
+                        pos.stop_loss = new_stop
+
+                    # Remove fixed take profit — let trailing stop handle exit
+                    # Only keep TP as a safety cap at 3x original distance
+                    if exit_state.phase >= 3:
+                        # In trailing mode, remove TP cap so winners run
+                        original_tp_dist = abs(pos.take_profit - pos.entry_price)
+                        extended_tp = (pos.entry_price + original_tp_dist * 3
+                                      if pos.side == "buy"
+                                      else pos.entry_price - original_tp_dist * 3)
+                        pos.take_profit = extended_tp
 
             closed = self._trader.check_open_positions(current_prices)
             for trade in closed:
                 pos_id = f"{trade.pair}_{trade.entry_price}"
                 self._trailing_stops.remove(pos_id)
+                self._smart_exit.remove(pos_id)
                 await self._event_bus.emit("trade_closed", trade=trade)
 
             # --- Step 3: Detect market regime ---
@@ -404,6 +451,28 @@ class TradingEngine:
                 logger.debug("Gate rejected %s: %s", pair, gate_decision.reasons)
                 return
 
+            # --- Step 6b: Trade Quality Filter ---
+            # Gate says direction is correct, filter checks conditions are right
+            spread_pct = 0.0
+            try:
+                order_book_data = await self._client.get_order_book(pair)
+                if order_book_data and order_book_data.get("bids") and order_book_data.get("asks"):
+                    best_bid = float(order_book_data["bids"][0][0])
+                    best_ask = float(order_book_data["asks"][0][0])
+                    spread_pct = self._trade_filter.get_spread_pct(best_bid, best_ask)
+            except Exception:
+                pass
+
+            filter_result = self._trade_filter.check(
+                confidence=gate_decision.confidence,
+                spread_pct=spread_pct,
+                open_positions=self._trader.get_open_positions(),
+                pair=pair,
+            )
+            if not filter_result["pass"]:
+                logger.info("Trade filter blocked %s: %s", pair, filter_result["reason"])
+                return
+
             # --- Step 7: Risk validation ---
             if not self._risk_manager.can_trade(self._trader.get_balance()):
                 logger.info("Risk manager blocked trade for %s", pair)
@@ -416,6 +485,9 @@ class TradingEngine:
                 avg_loss=0.004,
             )
 
+            # Apply adaptive sizing — bigger on win streaks, smaller on loss streaks
+            position_size = self._adaptive_sizer.adjust_size(position_size)
+
             # Reduce size if protection says so
             if protection_status.action == "REDUCE_SIZE":
                 position_size *= 0.5
@@ -425,8 +497,13 @@ class TradingEngine:
             trade = self._trader.execute_signal(signal, pair, position_size)
 
             if trade:
-                # Register trailing stop
+                # Register smart exit (4-phase profit maximizer)
                 pos_id = f"{pair}_{signal.entry_price}"
+                self._smart_exit.register(
+                    pos_id, pair, signal.direction.lower(),
+                    signal.entry_price, signal.stop_loss, signal.take_profit,
+                )
+                # Also register trailing stop as backup
                 self._trailing_stops.register(
                     pos_id, pair, signal.direction.lower(),
                     signal.entry_price, signal.stop_loss,

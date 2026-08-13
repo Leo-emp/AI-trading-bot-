@@ -1,0 +1,61 @@
+{
+  "_description": "Macro events calendar. Bot pauses trading before/during these.",
+  "_format": "Each event has: name, dates (ISO), pause_hours_before, pause_hours_after",
+  "_update": "Update this file monthly. Dates from federalreserve.gov and bls.gov",
+
+  "recurring_events": [
+    {
+      "name": "FOMC Rate Decision",
+      "description": "Federal Reserve interest rate announcement. Causes 2-5% crypto swings.",
+      "pause_hours_before": 2,
+      "pause_hours_after": 1,
+      "dates_2026": [
+        "2026-01-28", "2026-03-18", "2026-05-06", "2026-06-17",
+        "2026-07-29", "2026-09-16", "2026-11-04", "2026-12-16"
+      ]
+    },
+    {
+      "name": "US CPI Release",
+      "description": "Consumer Price Index. Released 8:30 AM ET. Major volatility trigger.",
+      "pause_hours_before": 1,
+      "pause_hours_after": 1,
+      "dates_2026": [
+        "2026-01-14", "2026-02-12", "2026-03-12", "2026-04-10",
+        "2026-05-13", "2026-06-10", "2026-07-15", "2026-08-12",
+        "2026-09-10", "2026-10-14", "2026-11-12", "2026-12-10"
+      ]
+    },
+    {
+      "name": "US Jobs Report (NFP)",
+      "description": "Non-Farm Payrolls. First Friday of month, 8:30 AM ET.",
+      "pause_hours_before": 1,
+      "pause_hours_after": 1,
+      "dates_2026": [
+        "2026-01-09", "2026-02-06", "2026-03-06", "2026-04-03",
+        "2026-05-08", "2026-06-05", "2026-07-02", "2026-08-07",
+        "2026-09-04", "2026-10-02", "2026-11-06", "2026-12-04"
+      ]
+    },
+    {
+      "name": "US PPI Release",
+      "description": "Producer Price Index. Usually day after CPI.",
+      "pause_hours_before": 1,
+      "pause_hours_after": 0.5,
+      "dates_2026": [
+        "2026-01-15", "2026-02-13", "2026-03-13", "2026-04-11",
+        "2026-05-14", "2026-06-11", "2026-07-16", "2026-08-13",
+        "2026-09-11", "2026-10-15", "2026-11-13", "2026-12-11"
+      ]
+    }
+  ],
+
+  "one_time_events": [
+    {
+      "name": "Bitcoin Halving (estimated)",
+      "description": "Block reward cut in half. Extreme volatility weeks before and after.",
+      "date": "2028-04-15",
+      "pause_hours_before": 48,
+      "pause_hours_after": 24
+    }
+  ]
+}

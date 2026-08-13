@@ -1,8 +1,10 @@
 # backtest/engine.py
 # Backtesting engine that simulates strategy performance on historical data.
 # Uses the PaperTrader for realistic fee simulation.
-# Walks through candles one by one, applying indicators and strategy logic.
-# Returns comprehensive performance metrics.
+#
+# OPTIMIZATION: Computes indicators ONCE on the full dataset upfront,
+# then walks through pre-computed rows. Previous version recomputed
+# indicators 8500+ times (once per candle), causing 5+ minute timeouts.
 
 from dataclasses import dataclass, field
 import pandas as pd
@@ -33,15 +35,10 @@ class BacktestResult:
 class BacktestEngine:
     """Simulates trading strategy on historical OHLCV data.
 
-    Walks through data candle by candle:
-    1. Compute indicators on data up to current candle
-    2. Ask strategy for a signal
-    3. Execute via PaperTrader (with fees)
-    4. Check stop-loss / take-profit on open positions
-    5. Record results
-
-    This is the MANDATORY gate — no strategy goes live without
-    passing backtesting first.
+    1. Compute indicators ONCE on full dataset (fast)
+    2. Walk candle by candle, slicing pre-computed data
+    3. Check SL/TP using candle high/low (realistic)
+    4. Execute via PaperTrader (with fees)
     """
 
     def __init__(self, initial_balance: float = 50.0,
@@ -55,14 +52,7 @@ class BacktestEngine:
 
     def run(self, strategy: BaseStrategy, df: pd.DataFrame,
             config: dict, pair: str = "BTC/USDT") -> BacktestResult:
-        """Run a full backtest on historical data.
-
-        df: historical OHLCV DataFrame (at least 100 candles for indicator warmup)
-        config: strategy parameters from strategies.yaml
-        pair: trading pair name for logging
-
-        Returns BacktestResult with all performance metrics.
-        """
+        """Run a full backtest on historical data."""
         indicator_engine = IndicatorEngine()
         trader = PaperTrader(
             initial_balance=self._initial_balance,
@@ -72,26 +62,36 @@ class BacktestEngine:
             time_exit_hours=999,  # disable time exit in backtest
         )
 
+        # Compute indicators ONCE on full dataset — the big optimization.
+        # Rolling indicators (RSI, EMA, BB, ATR) produce the same values
+        # whether computed on the full set or on a growing window.
+        df_with_indicators = indicator_engine.compute_all(df.copy())
+
         all_closed_trades: list[Trade] = []
         equity_curve = [self._initial_balance]
 
         # Need at least 50 candles for indicator warmup
         warmup = 50
+        # Strategy looks back up to 30 candles for patterns
+        lookback = 30
 
-        # Walk through candles one by one
-        for i in range(warmup, len(df)):
-            # Use only data up to current candle (no lookahead bias)
-            window = df.iloc[:i + 1].copy()
+        for i in range(warmup, len(df_with_indicators)):
+            # Slice pre-computed data — strategy gets a window of recent candles
+            start = max(0, i - lookback)
+            window = df_with_indicators.iloc[start:i + 1]
 
-            # Compute indicators
-            window = indicator_engine.compute_all(window)
+            # Use candle high/low for realistic SL/TP simulation
+            current_row = df_with_indicators.iloc[i]
+            current_price = current_row["close"]
+            candle_high = current_row["high"]
+            candle_low = current_row["low"]
 
-            # Get current price for position checks
-            current_price = window.iloc[-1]["close"]
-            current_prices = {pair: current_price}
-
-            # Check open positions for SL/TP hits
-            closed = trader.check_open_positions(current_prices)
+            # Check SL/TP on open positions FIRST (before new signals)
+            closed = trader.check_open_positions(
+                {pair: current_price},
+                highs={pair: candle_high},
+                lows={pair: candle_low},
+            )
             all_closed_trades.extend(closed)
 
             # Ask strategy for a signal
@@ -103,16 +103,24 @@ class BacktestEngine:
                 position_size = max(position_size, self._min_order)
 
                 if position_size <= trader.get_balance():
-                    trade = trader.execute_signal(signal, pair, position_size)
+                    trader.execute_signal(signal, pair, position_size)
 
-            equity_curve.append(trader.get_balance())
+            # Track TOTAL equity (free cash + unrealized position value)
+            # Without this, drawdown looks huge when positions are open
+            unrealized = 0.0
+            for pos in trader.get_open_positions():
+                if pos.side == "buy":
+                    unrealized += (current_price - pos.entry_price) * pos.quantity
+                else:
+                    unrealized += (pos.entry_price - current_price) * pos.quantity
+                unrealized += pos.quantity * pos.entry_price  # capital in position
+            equity_curve.append(trader.get_balance() + unrealized)
 
-        # Close any remaining open positions at final price
+        # Force-close ALL remaining open positions at final price
         final_price = df.iloc[-1]["close"]
-        remaining = trader.check_open_positions({pair: final_price})
+        remaining = trader.force_close_all({pair: final_price})
         all_closed_trades.extend(remaining)
 
-        # Calculate metrics
         return self._compute_metrics(all_closed_trades, equity_curve, trader.get_balance())
 
     def _compute_metrics(self, trades: list[Trade],
@@ -126,7 +134,6 @@ class BacktestEngine:
             )
 
         wins = [t for t in trades if t.pnl > 0]
-        losses = [t for t in trades if t.pnl <= 0]
         total = len(trades)
         win_rate = len(wins) / total if total > 0 else 0
 

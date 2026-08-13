@@ -72,7 +72,7 @@ class TestPositionSizer:
         settings = load_settings()
         tier = sizer.get_tier(600.0, settings)
         assert tier["max_risk_pct"] == 0.75
-        assert tier["max_positions"] == 5
+        assert tier["max_positions"] == 6
 
 
 class TestRiskManager:
@@ -80,7 +80,7 @@ class TestRiskManager:
     @pytest.mark.asyncio
     async def test_blocks_when_max_daily_trades_reached(self, mock_db, settings):
         """Should reject trades when daily limit is hit."""
-        mock_db.get_daily_trade_count = AsyncMock(return_value=50)
+        mock_db.get_daily_trade_count = AsyncMock(return_value=100)
         rm = RiskManager(mock_db, settings, balance=50.0)
         can, reason = await rm.can_trade()
         assert can is False

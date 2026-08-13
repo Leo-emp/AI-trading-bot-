@@ -88,7 +88,7 @@ class TelegramNotifier:
         emoji = "✅" if pnl > 0 else "❌"
         return (
             f"{emoji} <b>CLOSED: {pair}</b>\n"
-            f"Entry: ${entry:.2f} → Exit: ${exit_price:.2f}\n"
+            f"Entry: ${entry:.2f} -> Exit: ${exit_price:.2f}\n"
             f"P&L: ${pnl:.4f} (fees: ${fees:.4f})\n"
             f"Reason: {reason}"
         )

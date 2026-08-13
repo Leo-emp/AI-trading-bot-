@@ -2,9 +2,10 @@
 # Entry point for the AI Trading Bot.
 #
 # Usage:
-#   python main.py              → Paper trading (default, SAFE)
+#   python main.py              → Paper trading with FastEngine (default, SAFE)
 #   python main.py --live       → Live trading (REAL MONEY — be careful!)
 #   python main.py --backtest   → Backtest strategies on historical data
+#   python main.py --slow       → Use polling engine instead of WebSocket
 #
 # IMPORTANT: Always start with paper trading.
 # The bot must pass the backtesting gate AND 14+ days of paper trading
@@ -41,11 +42,15 @@ def setup_logging(level: str = "INFO"):
     )
 
 
-async def run_paper():
+async def run_paper(use_fast: bool = True):
     """Start paper trading mode."""
-    from src.core.engine import TradingEngine
+    if use_fast:
+        from src.core.fast_engine import FastEngine
+        engine = FastEngine(mode="paper")
+    else:
+        from src.core.engine import TradingEngine
+        engine = TradingEngine(mode="paper")
 
-    engine = TradingEngine(mode="paper")
     try:
         await engine.start()
         await engine.run()
@@ -55,10 +60,8 @@ async def run_paper():
         await engine.stop()
 
 
-async def run_live():
+async def run_live(use_fast: bool = True):
     """Start live trading mode. REAL MONEY."""
-    from src.core.engine import TradingEngine
-
     # Safety check — require explicit confirmation
     if os.getenv("TRADING_MODE") != "live":
         print("ERROR: Set TRADING_MODE=live in .env to enable live trading.")
@@ -69,7 +72,13 @@ async def run_live():
         print("ERROR: BINANCE_API_KEY not set in .env")
         sys.exit(1)
 
-    engine = TradingEngine(mode="live")
+    if use_fast:
+        from src.core.fast_engine import FastEngine
+        engine = FastEngine(mode="live")
+    else:
+        from src.core.engine import TradingEngine
+        engine = TradingEngine(mode="live")
+
     try:
         await engine.start()
         await engine.run()
@@ -136,6 +145,10 @@ def main():
         help="Run backtesting on historical data"
     )
     parser.add_argument(
+        "--slow", action="store_true",
+        help="Use polling engine instead of WebSocket (fallback if WebSocket fails)"
+    )
+    parser.add_argument(
         "--log-level", default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Set logging level (default: INFO)"
@@ -144,12 +157,14 @@ def main():
     args = parser.parse_args()
     setup_logging(args.log_level)
 
+    use_fast = not args.slow
+
     if args.backtest:
         asyncio.run(run_backtest())
     elif args.live:
-        asyncio.run(run_live())
+        asyncio.run(run_live(use_fast))
     else:
-        asyncio.run(run_paper())
+        asyncio.run(run_paper(use_fast))
 
 
 if __name__ == "__main__":

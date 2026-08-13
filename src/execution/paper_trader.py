@@ -125,14 +125,22 @@ class PaperTrader:
             fees=entry_fee, status="open",
         )
 
-    def check_open_positions(self, current_prices: dict) -> list[Trade]:
+    def check_open_positions(self, current_prices: dict,
+                             highs: dict = None,
+                             lows: dict = None) -> list[Trade]:
         """Check all open positions against current prices.
 
         Closes positions that hit stop-loss, take-profit, or time limit.
+        When highs/lows are provided (backtest mode), uses the candle's
+        high and low to check SL/TP — a candle's low might hit SL even
+        if the close price is above it.
+
         Returns list of closed Trade records.
         """
         closed_trades = []
         still_open = []
+        highs = highs or {}
+        lows = lows or {}
 
         for pos in self._positions:
             price = current_prices.get(pos.pair)
@@ -140,27 +148,35 @@ class PaperTrader:
                 still_open.append(pos)
                 continue
 
+            # Use candle extremes when available (backtest), else just close
+            candle_low = lows.get(pos.pair, price)
+            candle_high = highs.get(pos.pair, price)
+
             close_reason = None
             exit_price = price
 
-            # --- Check stop-loss ---
-            if pos.side == "buy" and price <= pos.stop_loss:
+            # --- Check stop-loss using candle low/high ---
+            # SL is checked FIRST (if both SL and TP hit in same candle,
+            # assume worst case: SL hit first)
+            if pos.side == "buy" and candle_low <= pos.stop_loss:
                 close_reason = "stop_loss"
                 exit_price = pos.stop_loss
-            elif pos.side == "sell" and price >= pos.stop_loss:
+            elif pos.side == "sell" and candle_high >= pos.stop_loss:
                 close_reason = "stop_loss"
                 exit_price = pos.stop_loss
 
-            # --- Check take-profit ---
-            if pos.side == "buy" and price >= pos.take_profit:
-                close_reason = "take_profit"
-                exit_price = pos.take_profit
-            elif pos.side == "sell" and price <= pos.take_profit:
-                close_reason = "take_profit"
-                exit_price = pos.take_profit
+            # --- Check take-profit using candle high/low ---
+            # Only check TP if SL wasn't already hit
+            if close_reason is None:
+                if pos.side == "buy" and candle_high >= pos.take_profit:
+                    close_reason = "take_profit"
+                    exit_price = pos.take_profit
+                elif pos.side == "sell" and candle_low <= pos.take_profit:
+                    close_reason = "take_profit"
+                    exit_price = pos.take_profit
 
             # --- Check time exit (4 hours) ---
-            if time.time() - pos.opened_at > self._time_exit:
+            if close_reason is None and time.time() - pos.opened_at > self._time_exit:
                 close_reason = "time_exit"
 
             if close_reason:
@@ -171,6 +187,18 @@ class PaperTrader:
 
         self._positions = still_open
         return closed_trades
+
+    def force_close_all(self, current_prices: dict) -> list[Trade]:
+        """Force-close all open positions at current market price.
+        Used at end of backtest to return all capital to balance.
+        """
+        closed = []
+        for pos in self._positions:
+            price = current_prices.get(pos.pair, pos.entry_price)
+            trade = self._close_position(pos, price, "force_close")
+            closed.append(trade)
+        self._positions = []
+        return closed
 
     def _close_position(self, pos: OpenPosition, exit_price: float,
                          reason: str) -> Trade:

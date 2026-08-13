@@ -1,141 +1,166 @@
 # src/strategies/smart_scalp.py
-# Smart Scalping Strategy — the primary profit engine.
+# Volume Breakout Strategy (Donchian Channel) -- catches new trends early.
 #
-# KEY DIFFERENCE from naive scalping:
-# - Uses 5m+15m candles (not 1m — too noisy, fees kill you)
-# - Requires MULTI-CONFIRMATION before entering (volume + momentum + indicator)
-# - LIMIT ORDERS ONLY (maker fee, not taker)
-# - 2:1 reward/risk ratio (0.8% TP, 0.4% SL) to overcome fee drag
-# - Skips marginal signals — quality over quantity
+# EVIDENCE (CoinQuant backtest, ETH/USDT 4H, Nov 2025 - May 2026):
+#   - Sharpe ratio: 1.95 (highest of ALL strategies tested)
+#   - Win rate: 33.3% (low but compensated by 4.9x payoff ratio)
+#   - Profit factor: 2.45
+#   - KEY: volume confirmation eliminates 40-50% of false breakouts
+#
+# HOW IT WORKS:
+#   1. ADX gate: only trade when ADX > 25 (confirmed trend, not choppy)
+#   2. Price breaks above 40-period Donchian high (or below low) = NEW extreme
+#   3. Volume must spike above average = real breakout, not random wick
+#   4. +DI/-DI confirms directional momentum matches the breakout
+#   5. MACD positive/negative as extra confirmation
+#
+# WHEN IT FAILS:
+#   - Sideways/choppy markets (ADX gate prevents this)
+#   - 14 consecutive losses documented during ranging ETH Dec 2025
+#   - Late trend entries near reversal (cooldown helps limit exposure)
+#
+# SL: 0.6% | TP: 1.5% | R:R = 2.5:1 | Cooldown: 18 candles (1.5 hrs)
+#
+# Class name kept as SmartScalpStrategy for backward compatibility.
+# Internally this is a Donchian channel breakout strategy.
 
 import pandas as pd
 from src.strategies.base import BaseStrategy, StrategySignal
-from src.data.indicators import IndicatorEngine
 
 
 class SmartScalpStrategy(BaseStrategy):
-    """Fee-aware scalping strategy.
 
-    Entry requires multi-confirmation:
-    1. RSI shows momentum (not overbought for buy, not oversold for sell)
-    2. MACD confirms direction (histogram positive for buy, negative for sell)
-    3. Volume is above average (confirms real interest, not noise)
-    4. Price action confirms (close above EMA for buy, below for sell)
-
-    All 4 must agree. This filters out 80%+ of noise signals.
-    """
+    def __init__(self):
+        super().__init__()
+        # Cooldown uses call counter, not candle count (window resets break len(df))
+        self._last_trade_call = -999
+        self._call_count = 0
 
     @property
     def name(self) -> str:
+        # Keep original name so config lookup and strategy selector still work
         return "smart_scalp"
 
     def evaluate(self, df: pd.DataFrame, config: dict) -> StrategySignal:
-        """Generate a scalping signal from indicator data.
-
-        Returns BUY/SELL only when all confirmation criteria are met.
-        Otherwise returns HOLD (no trade).
-        """
-        if len(df) < 5:
+        # Need enough candles for Donchian (40) + ADX (28) warmup
+        if len(df) < 20:
             return StrategySignal("HOLD", 0.0, strategy_name=self.name,
                                   reasons=["insufficient data"])
 
         latest = df.iloc[-1]
-        prev = df.iloc[-2]
+        self._call_count += 1
 
-        rsi = latest.get("rsi")
-        macd_hist = latest.get("macd_histogram")
-        prev_macd_hist = prev.get("macd_histogram")
-        vol_ratio = latest.get("volume_ratio")
+        # --- Cooldown: 18 candles (1.5 hours) between trades ---
+        # Breakout zones are choppy -- prevents rapid-fire entries
+        cooldown = config.get("cooldown_candles", 18)
+        if self._call_count - self._last_trade_call < cooldown:
+            return StrategySignal("HOLD", 0.0, strategy_name=self.name,
+                                  reasons=["cooldown active"])
+
+        # --- Pull all indicator values from the latest candle ---
         close = latest["close"]
-        ema_fast = latest.get("ema_fast")
-        ema_slow = latest.get("ema_slow")
+        adx = latest.get("adx")
+        di_plus = latest.get("di_plus")
+        di_minus = latest.get("di_minus")
+        # donchian_high/low are SHIFTED by 1 in indicator engine,
+        # so they represent the channel from PREVIOUS candles only
+        donchian_high = latest.get("donchian_high")
+        donchian_low = latest.get("donchian_low")
+        vol_ratio = latest.get("volume_ratio")
+        macd_hist = latest.get("macd_histogram")
 
-        # Check indicators are warmed up
-        if any(pd.isna(v) for v in [rsi, macd_hist, vol_ratio, ema_fast, ema_slow]):
+        # Skip if any required indicator hasn't warmed up yet
+        if any(pd.isna(v) for v in [adx, di_plus, di_minus, donchian_high,
+                                     donchian_low, vol_ratio]):
             return StrategySignal("HOLD", 0.0, strategy_name=self.name,
                                   reasons=["indicators warming up"])
 
-        # Config values
-        rsi_oversold = config.get("rsi_oversold", 30)
-        rsi_overbought = config.get("rsi_overbought", 70)
-        vol_multiplier = config.get("volume_spike_multiplier", 1.5)
-        tp_pct = config.get("take_profit_pct", 0.8) / 100  # convert to decimal
-        sl_pct = config.get("stop_loss_pct", 0.4) / 100
+        # ====== REGIME GATE: ADX > 25 (strong trend confirmed) ======
+        # Without this gate, breakouts in ranging markets produce massive
+        # losing streaks (14+ consecutive losses documented in research).
+        # ADX measures trend STRENGTH, not direction -- perfect for gating.
+        adx_threshold = config.get("adx_min", 25)
+        if adx < adx_threshold:
+            return StrategySignal("HOLD", 0.0, strategy_name=self.name,
+                                  reasons=[f"ADX too low ({adx:.0f} < {adx_threshold})"])
 
-        # --- Multi-confirmation for BUY ---
-        buy_confirmations = []
+        # --- SL/TP percentages from config ---
+        sl_pct = config.get("stop_loss_pct", 0.6) / 100  # 0.6% stop loss
+        tp_pct = config.get("take_profit_pct", 1.5) / 100  # 1.5% take profit
 
-        # 1. RSI not overbought (room to go up)
-        if rsi < rsi_overbought:
-            buy_confirmations.append(f"RSI {rsi:.0f} < {rsi_overbought}")
-        # Extra point if oversold (strong buy signal)
-        if rsi < rsi_oversold:
-            buy_confirmations.append(f"RSI oversold ({rsi:.0f})")
+        # ====== BREAKOUT SCORING ======
+        # Donchian break is the anchor (2 pts), needs at least 1 confirmation
+        buy_score = 0
+        sell_score = 0
+        buy_reasons = []
+        sell_reasons = []
 
-        # 2. MACD histogram positive or crossing up
-        if macd_hist > 0:
-            buy_confirmations.append(f"MACD positive ({macd_hist:.4f})")
-        if not pd.isna(prev_macd_hist) and prev_macd_hist < 0 and macd_hist > 0:
-            buy_confirmations.append("MACD bullish crossover")
+        # 1. Donchian channel breakout (2 points -- the PRIMARY signal)
+        # close > donchian_high = price broke above the N-period highest high
+        if close > donchian_high:
+            buy_score += 2
+            buy_reasons.append(f"broke {donchian_high:.0f} Donchian high")
+        # close < donchian_low = price broke below the N-period lowest low
+        if close < donchian_low:
+            sell_score += 2
+            sell_reasons.append(f"broke {donchian_low:.0f} Donchian low")
 
-        # 3. Volume above average
-        if vol_ratio >= vol_multiplier:
-            buy_confirmations.append(f"volume spike ({vol_ratio:.1f}x)")
+        # 2. Directional Index confirmation (1 point)
+        # +DI > -DI means bulls have more directional pressure
+        if di_plus > di_minus:
+            buy_score += 1
+            buy_reasons.append(f"+DI leads ({di_plus:.0f} > {di_minus:.0f})")
+        if di_minus > di_plus:
+            sell_score += 1
+            sell_reasons.append(f"-DI leads ({di_minus:.0f} > {di_plus:.0f})")
 
-        # 4. Price above fast EMA (upward momentum)
-        if close > ema_fast:
-            buy_confirmations.append("price above EMA-fast")
+        # 3. Volume confirmation (1 point)
+        # Research: volume filter eliminates 40-50% of false breakouts
+        vol_min = config.get("volume_min", 1.5)
+        if vol_ratio >= vol_min:
+            # Only award volume point if there's a directional signal
+            if buy_score > 0:
+                buy_score += 1
+                buy_reasons.append(f"volume {vol_ratio:.1f}x")
+            if sell_score > 0:
+                sell_score += 1
+                sell_reasons.append(f"volume {vol_ratio:.1f}x")
 
-        # --- Multi-confirmation for SELL ---
-        sell_confirmations = []
+        # 4. MACD direction (1 point)
+        # MACD histogram positive = bullish momentum, negative = bearish
+        if not pd.isna(macd_hist):
+            if macd_hist > 0:
+                buy_score += 1
+                buy_reasons.append("MACD bullish")
+            if macd_hist < 0:
+                sell_score += 1
+                sell_reasons.append("MACD bearish")
 
-        if rsi > rsi_oversold:
-            sell_confirmations.append(f"RSI {rsi:.0f} > {rsi_oversold}")
-        if rsi > rsi_overbought:
-            sell_confirmations.append(f"RSI overbought ({rsi:.0f})")
+        # --- Need 3+ points: breakout (2) + at least 1 confirmation ---
+        # This prevents trading on Donchian break alone (which has 40-50% false rate)
+        min_score = 3
 
-        if macd_hist < 0:
-            sell_confirmations.append(f"MACD negative ({macd_hist:.4f})")
-        if not pd.isna(prev_macd_hist) and prev_macd_hist > 0 and macd_hist < 0:
-            sell_confirmations.append("MACD bearish crossover")
-
-        if vol_ratio >= vol_multiplier:
-            sell_confirmations.append(f"volume spike ({vol_ratio:.1f}x)")
-
-        if close < ema_fast:
-            sell_confirmations.append("price below EMA-fast")
-
-        # --- Decision: need 4+ confirmations ---
-        # (RSI range + MACD direction + volume + price/EMA alignment)
-        min_confirmations = 4
-
-        if len(buy_confirmations) >= min_confirmations and len(buy_confirmations) > len(sell_confirmations):
-            confidence = min(len(buy_confirmations) / 6, 1.0)
-            entry = close
-            stop_loss = round(entry * (1 - sl_pct), 8)
-            take_profit = round(entry * (1 + tp_pct), 8)
+        if buy_score >= min_score and buy_score > sell_score:
+            confidence = min(buy_score / 5, 1.0)
+            self._last_trade_call = self._call_count
             return StrategySignal(
                 direction="BUY", confidence=confidence,
-                entry_price=entry, stop_loss=stop_loss,
-                take_profit=take_profit, strategy_name=self.name,
-                reasons=buy_confirmations,
+                entry_price=close,
+                stop_loss=round(close * (1 - sl_pct), 8),
+                take_profit=round(close * (1 + tp_pct), 8),
+                strategy_name=self.name, reasons=buy_reasons,
             )
 
-        if len(sell_confirmations) >= min_confirmations and len(sell_confirmations) > len(buy_confirmations):
-            confidence = min(len(sell_confirmations) / 6, 1.0)
-            entry = close
-            stop_loss = round(entry * (1 + sl_pct), 8)
-            take_profit = round(entry * (1 - tp_pct), 8)
+        if sell_score >= min_score and sell_score > buy_score:
+            confidence = min(sell_score / 5, 1.0)
+            self._last_trade_call = self._call_count
             return StrategySignal(
                 direction="SELL", confidence=confidence,
-                entry_price=entry, stop_loss=stop_loss,
-                take_profit=take_profit, strategy_name=self.name,
-                reasons=sell_confirmations,
+                entry_price=close,
+                stop_loss=round(close * (1 + sl_pct), 8),
+                take_profit=round(close * (1 - tp_pct), 8),
+                strategy_name=self.name, reasons=sell_reasons,
             )
 
-        # Not enough confirmation — HOLD
-        all_reasons = buy_confirmations + sell_confirmations
-        return StrategySignal(
-            direction="HOLD", confidence=0.0, strategy_name=self.name,
-            reasons=all_reasons if all_reasons else ["no multi-confirmation met"],
-        )
+        return StrategySignal("HOLD", 0.0, strategy_name=self.name,
+                              reasons=["no confirmed breakout"])

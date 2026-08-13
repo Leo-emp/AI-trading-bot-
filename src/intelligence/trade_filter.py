@@ -1,0 +1,156 @@
+# src/intelligence/trade_filter.py
+# Trade Quality Filter — the final gate before execution.
+#
+# Even when the 5 brains agree and the strategy says "go", we check:
+# 1. Is it a good TIME to trade? (skip dead hours)
+# 2. Is the SPREAD acceptable? (don't give away profit to market makers)
+# 3. Did we just LOSE? (cooldown to avoid revenge trading)
+# 4. Is the signal STRONG enough? (weak consensus = skip)
+# 5. Are we already EXPOSED? (don't stack correlated positions)
+#
+# This filter sits between the Trade Gate and execution.
+# Trade Gate says "direction is correct" — this filter says "conditions are right."
+
+import logging
+from datetime import datetime, timezone, timedelta
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+
+class TradeFilter:
+    """Filters out trades with bad timing, conditions, or risk overlap.
+
+    This is the final quality check before risking real money.
+    Every "skip" here is a loss prevented.
+    """
+
+    def __init__(self,
+                 min_confidence: float = 0.55,
+                 max_spread_pct: float = 0.06,
+                 cooldown_minutes: int = 5,
+                 max_correlated_positions: int = 2,
+                 dead_hours_utc: Optional[list[int]] = None):
+        # Minimum average confidence from agreeing brains
+        # 0.55 means brains must be at least 55% sure, not just barely agreeing
+        self._min_confidence = min_confidence
+
+        # Maximum bid-ask spread as % of price
+        # 0.06% = on $100k BTC, spread must be < $60
+        # Above this, the spread eats too much of our tiny scalp profit
+        self._max_spread_pct = max_spread_pct
+
+        # Minutes to wait after a losing trade
+        # Prevents revenge trading — same bad conditions often persist
+        self._cooldown_minutes = cooldown_minutes
+
+        # Max positions in correlated assets (BTC, ETH, SOL all move together)
+        self._max_correlated = max_correlated_positions
+
+        # Hours in UTC where volume is lowest
+        # Only skip midnight-2am UTC (the true dead zone between US close and Asia)
+        # Keeping more hours open = more trading opportunities
+        self._dead_hours = dead_hours_utc or [0, 1]
+
+        # Track last loss time for cooldown
+        self._last_loss_time: Optional[datetime] = None
+
+    def record_loss(self):
+        """Record that a trade just closed at a loss."""
+        self._last_loss_time = datetime.now(timezone.utc)
+
+    def check(self,
+              confidence: float,
+              spread_pct: float,
+              open_positions: list,
+              pair: str,
+              now: Optional[datetime] = None) -> dict:
+        """Run all quality checks. Returns pass/fail with reason.
+
+        Args:
+            confidence: average confidence from agreeing brains (0-1)
+            spread_pct: current bid-ask spread as percentage
+            open_positions: list of currently open positions
+            pair: the pair we want to trade
+            now: current time (for testing)
+
+        Returns:
+            {"pass": bool, "reason": str, "filter": str}
+        """
+        if now is None:
+            now = datetime.now(timezone.utc)
+
+        # --- Filter 1: Dead hours ---
+        if now.hour in self._dead_hours:
+            return {
+                "pass": False,
+                "reason": f"Dead hour (UTC {now.hour}:00). Low volume = bad fills.",
+                "filter": "time",
+            }
+
+        # --- Filter 2: Spread too wide ---
+        if spread_pct > self._max_spread_pct:
+            return {
+                "pass": False,
+                "reason": (f"Spread {spread_pct:.3f}% > max {self._max_spread_pct:.3f}%. "
+                          f"Would eat too much profit."),
+                "filter": "spread",
+            }
+
+        # --- Filter 3: Cooldown after loss ---
+        if self._last_loss_time:
+            elapsed = (now - self._last_loss_time).total_seconds() / 60
+            if elapsed < self._cooldown_minutes:
+                remaining = self._cooldown_minutes - elapsed
+                return {
+                    "pass": False,
+                    "reason": (f"Cooldown: {remaining:.0f}min left after last loss. "
+                              f"Avoiding revenge trade."),
+                    "filter": "cooldown",
+                }
+
+        # --- Filter 4: Minimum signal strength ---
+        if confidence < self._min_confidence:
+            return {
+                "pass": False,
+                "reason": (f"Weak signal ({confidence:.0%} < {self._min_confidence:.0%}). "
+                          f"Brains agree but aren't confident enough."),
+                "filter": "confidence",
+            }
+
+        # --- Filter 5: Correlation exposure ---
+        # BTC-correlated group: most major cryptos move with BTC
+        correlated_group = {"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT",
+                           "ADAUSDT", "DOGEUSDT", "XRPUSDT", "AVAXUSDT",
+                           "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT",
+                           "ADA/USDT", "DOGE/USDT", "XRP/USDT", "AVAX/USDT"}
+
+        if pair in correlated_group:
+            # Count how many correlated positions are already open
+            correlated_open = sum(
+                1 for pos in open_positions
+                if getattr(pos, "pair", "") in correlated_group
+            )
+            if correlated_open >= self._max_correlated:
+                return {
+                    "pass": False,
+                    "reason": (f"Already {correlated_open} correlated positions open. "
+                              f"Max {self._max_correlated}. One BTC dump would hit all."),
+                    "filter": "correlation",
+                }
+
+        # --- All checks passed ---
+        logger.debug("Trade filter PASSED for %s (conf=%.0f%%, spread=%.3f%%)",
+                    pair, confidence * 100, spread_pct)
+        return {
+            "pass": True,
+            "reason": "All quality checks passed",
+            "filter": "none",
+        }
+
+    def get_spread_pct(self, best_bid: float, best_ask: float) -> float:
+        """Calculate spread as percentage of mid price."""
+        if best_bid <= 0 or best_ask <= 0:
+            return 999.0  # invalid → block trade
+        mid = (best_bid + best_ask) / 2
+        return ((best_ask - best_bid) / mid) * 100

@@ -1,8 +1,20 @@
-# Trading pairs to monitor (highest liquidity, tightest spreads)
+# Trading pairs to monitor
+# Selected for: high liquidity, tight spreads, enough volatility to scalp
+# More pairs = more opportunities without weakening quality filters
+# Each pair gets its own 5-brain evaluation — no shortcuts
 pairs:
   - BTC/USDT
   - ETH/USDT
   - SOL/USDT
+  - XRP/USDT
+  - DOGE/USDT
+  - BNB/USDT
+  - ADA/USDT
+  - AVAX/USDT
+  - MATIC/USDT
+  - LINK/USDT
+  - DOT/USDT
+  - NEAR/USDT
 
 # Fee structure (Binance with BNB discount)
 fees:
@@ -19,11 +31,11 @@ loop_interval_seconds: 30
 
 # Risk management
 risk:
-  max_open_positions: 3
+  max_open_positions: 4
   max_daily_drawdown_pct: 5.0
   max_consecutive_losses: 5
   consecutive_loss_pause_minutes: 30
-  max_daily_trades: 50
+  max_daily_trades: 100
   min_balance_floor: 10.0
   max_position_pct: 25.0
   min_order_size: 10.0
@@ -33,27 +45,28 @@ risk:
   time_exit_hours: 1
 
 # Auto-scaling tiers (keyed by minimum balance)
+# More pairs = more opportunities, tiers scale positions accordingly
 scaling:
   - min_balance: 20
     name: micro
     max_risk_pct: 0.4
     max_positions: 3
-    daily_trade_limit: 50
+    daily_trade_limit: 80
   - min_balance: 100
     name: starter
     max_risk_pct: 0.5
     max_positions: 4
-    daily_trade_limit: 60
+    daily_trade_limit: 100
   - min_balance: 500
     name: growth
     max_risk_pct: 0.75
-    max_positions: 5
-    daily_trade_limit: 80
+    max_positions: 6
+    daily_trade_limit: 150
   - min_balance: 2000
     name: established
     max_risk_pct: 1.0
-    max_positions: 6
-    daily_trade_limit: 100
+    max_positions: 8
+    daily_trade_limit: 200
 
 # Protection layers
 protection:

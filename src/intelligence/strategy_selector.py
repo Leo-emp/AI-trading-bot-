@@ -8,11 +8,11 @@
 # 3. Picks the best strategy for current conditions
 # 4. Falls back to the safest option when uncertain
 #
-# Regime → Strategy mapping:
-# - TRENDING_UP   → momentum (ride the trend)
-# - TRENDING_DOWN → momentum (short the trend)
-# - RANGING       → grid + mean_reversion (buy low, sell high)
-# - VOLATILE      → smart_scalp (quick in/out with tight stops)
+# Regime -> Strategy mapping:
+# - TRENDING_UP   -> momentum (ride the trend)
+# - TRENDING_DOWN -> momentum (short the trend)
+# - RANGING       -> grid + mean_reversion (buy low, sell high)
+# - VOLATILE      -> smart_scalp (quick in/out with tight stops)
 
 import logging
 from typing import Optional
@@ -23,12 +23,17 @@ from src.strategies.base import BaseStrategy
 
 logger = logging.getLogger(__name__)
 
-# Which strategies work best in which regime
+# Which strategies work best in which regime (evidence-based mapping)
+# Each strategy covers a DIFFERENT phase of the trend cycle:
+# 1. grid (vol squeeze) = pre-trend compression -> first mover
+# 2. smart_scalp (breakout) = new high/low -> trend start
+# 3. momentum = EMA crossover -> trend confirmation
+# 4. mean_reversion (pullback) = dip in trend -> continuation
 REGIME_STRATEGY_MAP = {
-    "TRENDING_UP": ["momentum", "smart_scalp"],
-    "TRENDING_DOWN": ["momentum", "smart_scalp"],
-    "RANGING": ["grid", "mean_reversion", "smart_scalp"],
-    "VOLATILE": ["smart_scalp", "grid"],
+    "TRENDING_UP": ["momentum", "smart_scalp", "mean_reversion"],
+    "TRENDING_DOWN": ["momentum", "smart_scalp", "mean_reversion"],
+    "RANGING": ["grid"],                               # squeeze detection for breakout
+    "VOLATILE": ["smart_scalp", "grid"],               # breakout + squeeze (big moves)
 }
 
 
@@ -52,7 +57,7 @@ class StrategySelector:
         """
         # Check for regime change — re-enable strategies on regime shift
         if self._last_regime and self._last_regime != regime.regime:
-            logger.info("Regime changed: %s → %s, re-enabling strategies",
+            logger.info("Regime changed: %s -> %s, re-enabling strategies",
                        self._last_regime, regime.regime)
             self._tracker.reset_all()
         self._last_regime = regime.regime

@@ -20,9 +20,9 @@ import logging
 logger = logging.getLogger(__name__)
 
 # Confidence threshold above which an opposing signal vetoes the trade
-VETO_THRESHOLD = 0.7
-# Minimum brains that must agree
-MIN_CONSENSUS = 3
+VETO_THRESHOLD = 0.65
+# Minimum brains that must agree — stricter = fewer but higher quality trades
+MIN_CONSENSUS = 4
 
 
 @dataclass(frozen=True)

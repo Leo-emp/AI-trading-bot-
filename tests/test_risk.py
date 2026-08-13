@@ -80,7 +80,7 @@ class TestRiskManager:
     @pytest.mark.asyncio
     async def test_blocks_when_max_daily_trades_reached(self, mock_db, settings):
         """Should reject trades when daily limit is hit."""
-        mock_db.get_daily_trade_count = AsyncMock(return_value=25)
+        mock_db.get_daily_trade_count = AsyncMock(return_value=50)
         rm = RiskManager(mock_db, settings, balance=50.0)
         can, reason = await rm.can_trade()
         assert can is False

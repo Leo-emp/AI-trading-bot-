@@ -30,7 +30,7 @@ risk:
   black_swan_pct: 5.0
   stale_data_seconds: 10
   max_spread_pct: 0.15
-  time_exit_hours: 4
+  time_exit_hours: 1
 
 # Auto-scaling tiers (keyed by minimum balance)
 scaling:

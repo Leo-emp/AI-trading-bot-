@@ -39,25 +39,28 @@ class TrailingStopState:
 class TrailingStopManager:
     """Manages trailing stops for all open positions.
 
-    Activation rules:
-    - Trailing stop activates after price moves X% in your favor
-    - Once activated, the stop follows at a fixed % distance
-    - The stop only moves in the favorable direction (never backwards)
+    Two-phase stop system:
+    Phase 1 — Break-even: once price moves 0.2% in your favor,
+              SL moves to entry price. Trade becomes RISK-FREE.
+    Phase 2 — Trailing: once price moves 0.5% in your favor,
+              SL follows price at 0.3% distance. Locks in profits.
 
     Example for a BUY at $50,000:
-    - Activation at +0.5% → $50,250
-    - Trail distance: 0.3%
-    - Price hits $50,400 → stop moves to $50,400 * (1 - 0.003) = $50,249
-    - Price hits $50,600 → stop moves to $50,600 * (1 - 0.003) = $50,448
-    - Price drops to $50,448 → STOP HIT, exit with profit
+    - Price hits $50,100 (+0.2%) → SL moves to $50,000 (break-even)
+    - Price hits $50,250 (+0.5%) → trailing activates, SL = $50,099
+    - Price hits $50,600 → SL moves to $50,448
+    - Price drops to $50,448 → STOP HIT, exit with $448 profit
     """
 
     def __init__(self, activation_pct: float = 0.5,
-                 trail_distance_pct: float = 0.3):
+                 trail_distance_pct: float = 0.3,
+                 breakeven_pct: float = 0.2):
         # Price must move this % in your favor to activate trailing
         self._activation_pct = activation_pct / 100
         # Trailing stop distance from highest/lowest price
         self._trail_distance_pct = trail_distance_pct / 100
+        # Price must move this % to trigger break-even stop
+        self._breakeven_pct = breakeven_pct / 100
         # Active trailing stops: position_id → TrailingStopState
         self._stops: dict[str, TrailingStopState] = {}
 
@@ -103,17 +106,23 @@ class TrailingStopManager:
         if price > state.highest_price:
             state.highest_price = price
 
-        # Check if trailing should activate
+        # Phase 1: Break-even — move SL to entry once 0.2% in profit
+        breakeven_price = state.entry_price * (1 + self._breakeven_pct)
+        if not state.is_activated and price >= breakeven_price:
+            if state.current_stop < state.entry_price:
+                state.current_stop = state.entry_price
+                logger.info("BREAK-EVEN stop set for %s at %.2f (risk-free)",
+                           state.pair, state.current_stop)
+
+        # Phase 2: Trailing — activate after 0.5% in profit
         if not state.is_activated:
             if price >= state.activation_price:
                 state.is_activated = True
-                # Set trailing stop
                 new_stop = price * (1 - state.trail_distance_pct)
                 state.current_stop = max(state.current_stop, new_stop)
                 logger.info("Trailing stop ACTIVATED for %s at %.2f, stop: %.2f",
                            state.pair, price, state.current_stop)
         else:
-            # Trailing is active — move stop up if price made new high
             new_stop = state.highest_price * (1 - state.trail_distance_pct)
             if new_stop > state.current_stop:
                 state.current_stop = new_stop
@@ -127,6 +136,15 @@ class TrailingStopManager:
         if price < state.lowest_price:
             state.lowest_price = price
 
+        # Phase 1: Break-even
+        breakeven_price = state.entry_price * (1 - self._breakeven_pct)
+        if not state.is_activated and price <= breakeven_price:
+            if state.current_stop > state.entry_price:
+                state.current_stop = state.entry_price
+                logger.info("BREAK-EVEN stop set for short %s at %.2f (risk-free)",
+                           state.pair, state.current_stop)
+
+        # Phase 2: Trailing
         if not state.is_activated:
             if price <= state.activation_price:
                 state.is_activated = True

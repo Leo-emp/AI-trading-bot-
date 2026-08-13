@@ -1,0 +1,36 @@
+# /etc/systemd/system/ai-trading-bot.service
+# Systemd service for 24/7 autonomous trading.
+# Auto-starts on boot, auto-restarts on crash.
+#
+# Commands:
+#   sudo systemctl start ai-trading-bot     — start
+#   sudo systemctl stop ai-trading-bot      — stop
+#   sudo systemctl restart ai-trading-bot   — restart
+#   sudo systemctl status ai-trading-bot    — check status
+#   journalctl -u ai-trading-bot -f         — live logs
+
+[Unit]
+Description=AI Crypto Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/ai-trading-bot
+ExecStart=/home/ubuntu/ai-trading-bot/.venv/bin/python watchdog.py
+Restart=always
+RestartSec=30
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/ubuntu/ai-trading-bot
+
+# Environment
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

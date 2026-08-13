@@ -10,13 +10,20 @@ fees:
   taker_rate: 0.001    # 0.1% per side (never used — limit only)
   use_bnb_discount: true
 
+# Initial balance for paper trading
+initial_balance: 100.0
+
+# Loop interval — how often to scan for trades (seconds)
+# Lower = more trades but more API calls
+loop_interval_seconds: 30
+
 # Risk management
 risk:
   max_open_positions: 3
   max_daily_drawdown_pct: 5.0
   max_consecutive_losses: 5
   consecutive_loss_pause_minutes: 30
-  max_daily_trades: 25
+  max_daily_trades: 50
   min_balance_floor: 10.0
   max_position_pct: 25.0
   min_order_size: 10.0
@@ -28,21 +35,25 @@ risk:
 # Auto-scaling tiers (keyed by minimum balance)
 scaling:
   - min_balance: 20
+    name: micro
     max_risk_pct: 0.4
     max_positions: 3
-    daily_trade_limit: 25
+    daily_trade_limit: 50
   - min_balance: 100
+    name: starter
     max_risk_pct: 0.5
     max_positions: 4
-    daily_trade_limit: 40
+    daily_trade_limit: 60
   - min_balance: 500
+    name: growth
     max_risk_pct: 0.75
     max_positions: 5
-    daily_trade_limit: 60
+    daily_trade_limit: 80
   - min_balance: 2000
+    name: established
     max_risk_pct: 1.0
     max_positions: 6
-    daily_trade_limit: 80
+    daily_trade_limit: 100
 
 # Protection layers
 protection:

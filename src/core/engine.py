@@ -1,18 +1,24 @@
 # src/core/engine.py
-# The main trading engine — orchestrates everything.
-# This is the brain that ties all components together:
+# The main trading engine — the brain that orchestrates EVERYTHING.
 #
-# 1. Check protection system → can we trade?
-# 2. Fetch latest market data via WebSocket
-# 3. Compute indicators on fresh candles
-# 4. Ask each "brain" (strategy + correlation + order book) for signals
-# 5. Run 3/5 consensus through the Trade Gate
-# 6. Validate with Risk Manager (position sizing, SL/TP)
-# 7. Execute via PaperTrader or LiveTrader
-# 8. Emit events for notifications/logging
+# Flow per cycle:
+# 1. Protection check → can we trade at all?
+# 2. Detect market regime → trending, ranging, or volatile?
+# 3. Select strategy → pick the best one for this regime
+# 4. Fetch data → candles from Binance for all timeframes
+# 5. Compute indicators → RSI, MACD, BB, EMA, ATR, volume
+# 6. Collect 5 brain signals:
+#    Brain 1: Strategy signal (smart_scalp / grid / momentum / mean_reversion)
+#    Brain 2: Order book analysis (imbalance, whales, liquidity)
+#    Brain 3: Gemini AI analysis (market conditions, sentiment)
+#    Brain 4: Multi-timeframe alignment (5m + 15m + 1h agree?)
+#    Brain 5: Cross-asset correlation (BTC trend affects alts)
+# 7. Trade Gate → 3/5 consensus required, veto on strong opposing
+# 8. Risk validation → position sizing, SL/TP, balance check
+# 9. Execute → PaperTrader or live, with trailing stops
+# 10. Track performance → auto-disable losing strategies
 #
-# The engine runs in a continuous loop with configurable intervals.
-# Protection system can pause, reduce, or shut down trading at any time.
+# The engine runs in a continuous loop until stopped.
 
 import asyncio
 import logging
@@ -25,11 +31,20 @@ from src.data.feed import BinanceClient, PriceFeed
 from src.data.indicators import IndicatorEngine
 from src.data.order_book import OrderBookAnalyzer
 from src.intelligence.correlation import CorrelationTracker
+from src.intelligence.market_regime import MarketRegimeDetector
+from src.intelligence.gemini_brain import GeminiBrain
+from src.intelligence.multi_timeframe import MultiTimeframeBrain
+from src.intelligence.performance_tracker import PerformanceTracker
+from src.intelligence.strategy_selector import StrategySelector
 from src.risk.manager import RiskManager
 from src.risk.protection import ProtectionSystem
 from src.ai.trade_gate import TradeGate, BrainSignal
 from src.strategies.smart_scalp import SmartScalpStrategy
+from src.strategies.grid import GridStrategy
+from src.strategies.momentum import MomentumStrategy
+from src.strategies.mean_reversion import MeanReversionStrategy
 from src.execution.paper_trader import PaperTrader
+from src.execution.trailing_stop import TrailingStopManager
 from src.notifications.telegram import TelegramNotifier
 from src.storage.database import Database
 
@@ -46,34 +61,54 @@ class TradingEngine:
     """
 
     def __init__(self, mode: str = "paper"):
-        # Trading mode: "paper" or "live"
         self._mode = mode
         self._running = False
 
-        # Will be initialized in start()
+        # Configuration (loaded in start())
         self._settings = None
         self._strategies_config = None
+
+        # Core infrastructure
         self._event_bus = EventBus()
         self._db = None
         self._client = None
-        self._price_feed = None
         self._indicator_engine = IndicatorEngine()
         self._order_book = OrderBookAnalyzer()
+        self._notifier = TelegramNotifier()
+
+        # Intelligence layer
+        self._regime_detector = MarketRegimeDetector()
         self._correlation = CorrelationTracker()
+        self._gemini_brain = GeminiBrain()
+        self._mtf_brain = MultiTimeframeBrain()
+        self._performance_tracker = PerformanceTracker()
+
+        # All 4 strategies
+        self._strategies = {
+            "smart_scalp": SmartScalpStrategy(),
+            "grid": GridStrategy(),
+            "momentum": MomentumStrategy(),
+            "mean_reversion": MeanReversionStrategy(),
+        }
+
+        # Strategy selector (initialized after performance tracker)
+        self._strategy_selector = StrategySelector(
+            self._strategies, self._performance_tracker
+        )
+
+        # Risk + protection
         self._protection = None
         self._risk_manager = None
         self._trade_gate = TradeGate()
-        self._trader = None
-        self._notifier = TelegramNotifier()
 
-        # Strategies
-        self._strategies = {
-            "smart_scalp": SmartScalpStrategy(),
-        }
+        # Execution
+        self._trader = None
+        self._trailing_stops = TrailingStopManager()
 
         # Tracking
         self._cycle_count = 0
         self._last_daily_summary = None
+        self._price_history: dict[str, list[float]] = {}
 
     async def start(self):
         """Initialize all components and connect to exchange."""
@@ -82,8 +117,6 @@ class TradingEngine:
         # Load configuration
         self._settings = load_settings()
         self._strategies_config = load_strategies()
-
-        # Get risk parameters based on balance tier
         risk_cfg = self._settings.get("risk", {})
 
         # Initialize database
@@ -97,10 +130,10 @@ class TradingEngine:
 
         # Initialize protection system
         self._protection = ProtectionSystem(
-            max_consecutive_losses=risk_cfg.get("max_consecutive_losses", 3),
-            daily_drawdown_limit=risk_cfg.get("daily_drawdown_limit", 5.0),
-            weekly_drawdown_limit=risk_cfg.get("weekly_drawdown_limit", 10.0),
-            monthly_drawdown_limit=risk_cfg.get("monthly_drawdown_limit", 20.0),
+            max_consecutive_losses=risk_cfg.get("max_consecutive_losses", 5),
+            daily_drawdown_limit=risk_cfg.get("max_daily_drawdown_pct", 5.0),
+            weekly_drawdown_limit=risk_cfg.get("weekly_drawdown_reduce_pct", 10.0),
+            monthly_drawdown_limit=risk_cfg.get("monthly_drawdown_emergency_pct", 20.0),
             balance_floor_pct=risk_cfg.get("balance_floor_pct", 50.0),
         )
 
@@ -121,16 +154,19 @@ class TradingEngine:
         self._register_events()
 
         self._running = True
-        logger.info("TradingEngine started. Balance: $%.2f, Tier: %s", balance, tier.get("name", "micro"))
+        logger.info(
+            "TradingEngine started. Balance: $%.2f | Mode: %s | "
+            "Strategies: %s | Brains: 5",
+            balance, self._mode, list(self._strategies.keys()),
+        )
 
     def _register_events(self):
-        """Wire up event handlers for notifications."""
+        """Wire up event handlers for notifications and tracking."""
         self._event_bus.on("trade_opened", self._on_trade_opened)
         self._event_bus.on("trade_closed", self._on_trade_closed)
         self._event_bus.on("protection_triggered", self._on_protection)
 
     async def _on_trade_opened(self, **kwargs):
-        """Handle trade opened event — send Telegram notification."""
         await self._notifier.send_trade(
             pair=kwargs.get("pair", ""),
             side=kwargs.get("side", ""),
@@ -142,13 +178,13 @@ class TradingEngine:
         )
 
     async def _on_trade_closed(self, **kwargs):
-        """Handle trade closed event."""
         trade = kwargs.get("trade")
         if trade:
             await self._db.save_trade(trade)
+            # Record in performance tracker
+            self._performance_tracker.record_trade(trade.strategy, trade.pnl)
 
     async def _on_protection(self, **kwargs):
-        """Handle protection trigger — alert via Telegram."""
         await self._notifier.send_protection_alert(
             layer=kwargs.get("layer", ""),
             action=kwargs.get("action", ""),
@@ -163,7 +199,7 @@ class TradingEngine:
         pairs = self._settings.get("pairs", ["BTC/USDT"])
         interval = self._settings.get("loop_interval_seconds", 60)
 
-        logger.info("Entering main trading loop. Pairs: %s, Interval: %ds", pairs, interval)
+        logger.info("Entering main loop. Pairs: %s, Interval: %ds", pairs, interval)
 
         while self._running:
             try:
@@ -178,16 +214,16 @@ class TradingEngine:
                 )
 
                 if protection_status.action == "SHUTDOWN":
-                    logger.critical("Protection SHUTDOWN triggered: %s", protection_status.reason)
+                    logger.critical("SHUTDOWN: %s", protection_status.reason)
                     await self._event_bus.emit("protection_triggered",
                                                layer="system", action="SHUTDOWN",
                                                reason=protection_status.reason)
                     break
 
-                if protection_status.action == "PAUSE":
-                    logger.warning("Trading PAUSED: %s", protection_status.reason)
+                if protection_status.action in ("PAUSE", "EMERGENCY_SELL"):
+                    logger.warning("PAUSED: %s", protection_status.reason)
                     await self._event_bus.emit("protection_triggered",
-                                               layer="session", action="PAUSE",
+                                               layer="session", action=protection_status.action,
                                                reason=protection_status.reason)
                     await asyncio.sleep(interval)
                     continue
@@ -196,160 +232,264 @@ class TradingEngine:
                 for pair in pairs:
                     await self._process_pair(pair, protection_status)
 
-                # Step 3: Check for daily summary
+                # Step 3: Daily summary check
                 await self._check_daily_summary()
 
-                # Wait for next cycle
                 await asyncio.sleep(interval)
 
             except asyncio.CancelledError:
                 logger.info("Trading loop cancelled")
                 break
             except Exception as e:
-                logger.error("Error in trading cycle %d: %s", self._cycle_count, e)
+                logger.error("Cycle %d error: %s", self._cycle_count, e)
                 await self._notifier.send_error("CycleError", str(e))
                 await asyncio.sleep(interval)
 
     async def _process_pair(self, pair: str, protection_status):
-        """Process a single trading pair — the core trading logic."""
+        """Process a single trading pair — the FULL intelligence pipeline."""
         try:
-            # Fetch latest candles
-            df = await self._client.get_historical_ohlcv(pair, "5m", limit=100)
-            if df.empty or len(df) < 50:
-                logger.warning("Not enough data for %s, skipping", pair)
+            # --- Step 1: Fetch candle data for primary timeframe ---
+            df_5m = await self._client.get_historical_ohlcv(pair, "5m", limit=100)
+            if df_5m.empty or len(df_5m) < 50:
+                logger.warning("Not enough 5m data for %s", pair)
                 return
 
-            # Compute indicators
-            df = self._indicator_engine.compute_all(df)
-            current_price = df.iloc[-1]["close"]
+            # Compute indicators on primary timeframe
+            df_5m = self._indicator_engine.compute_all(df_5m)
+            current_price = df_5m.iloc[-1]["close"]
+            latest = df_5m.iloc[-1]
 
-            # Check open positions for SL/TP
-            closed = self._trader.check_open_positions({pair: current_price})
+            # Track price history for Gemini brain
+            if pair not in self._price_history:
+                self._price_history[pair] = []
+            self._price_history[pair].append(current_price)
+            if len(self._price_history[pair]) > 100:
+                self._price_history[pair] = self._price_history[pair][-100:]
+
+            # Update correlation tracker
+            self._correlation.update(pair, current_price)
+
+            # --- Step 2: Check open positions for SL/TP/trailing ---
+            current_prices = {pair: current_price}
+
+            # Update trailing stops before checking positions
+            for pos in self._trader.get_open_positions():
+                pos_id = f"{pos.pair}_{pos.entry_price}"
+                new_stop = self._trailing_stops.update(pos_id, current_price)
+                if new_stop and new_stop != pos.stop_loss:
+                    pos.stop_loss = new_stop  # update the position's SL
+
+            closed = self._trader.check_open_positions(current_prices)
             for trade in closed:
+                pos_id = f"{trade.pair}_{trade.entry_price}"
+                self._trailing_stops.remove(pos_id)
                 await self._event_bus.emit("trade_closed", trade=trade)
 
-            # Collect brain signals from multiple sources
-            brain_signals = []
+            # --- Step 3: Detect market regime ---
+            regime = self._regime_detector.detect(df_5m)
+            logger.info("Regime: %s (%.0f%% confidence, %s volatility)",
+                       regime.regime, regime.confidence * 100, regime.volatility)
 
-            # Brain 1: Smart Scalp strategy
-            scalp_config = self._strategies_config.get("smart_scalp", {})
-            signal = self._strategies["smart_scalp"].evaluate(df, scalp_config)
-            if signal.direction != "HOLD":
-                brain_signals.append(BrainSignal(
-                    brain_name="smart_scalp",
-                    direction=signal.direction,
-                    confidence=signal.confidence,
-                    reasoning=f"RSI/MACD/Volume/EMA confirmation",
-                ))
-
-            # Brain 2: Raw indicator signal
-            indicator_signal = self._indicator_engine.get_signal(df)
-            if indicator_signal["direction"] != "HOLD":
-                brain_signals.append(BrainSignal(
-                    brain_name="indicators",
-                    direction=indicator_signal["direction"],
-                    confidence=indicator_signal["strength"],
-                    reasoning=indicator_signal["reason"],
-                ))
-
-            # Brain 3: Correlation analysis
-            self._correlation.update(pair, current_price)
-            corr_signal = self._correlation.get_signal(pair)
-            if corr_signal and corr_signal.get("direction") != "HOLD":
-                brain_signals.append(BrainSignal(
-                    brain_name="correlation",
-                    direction=corr_signal["direction"],
-                    confidence=corr_signal.get("confidence", 0.5),
-                    reasoning=corr_signal.get("reason", "correlation signal"),
-                ))
-
-            # Brain 4: Order book analysis (needs live order book data)
-            # Brain 5: AI/Gemini analysis (Phase 2 — ML after 30 days)
-            # For now, these are placeholder signals that vote HOLD
-
-            # If not enough brain signals, skip
-            if len(brain_signals) < 2:
-                logger.debug("Not enough brain signals for %s (%d), skipping", pair, len(brain_signals))
+            # --- Step 4: Select best strategy for this regime ---
+            strategy = self._strategy_selector.select(regime)
+            if strategy is None:
+                logger.info("No strategy available for %s, skipping", pair)
                 return
 
-            # Run through Trade Gate (3/5 consensus)
+            strategy_config = self._strategies_config.get(strategy.name, {})
+
+            # --- Step 5: Collect all 5 brain signals ---
+            brain_signals = {}
+
+            # Brain 1: Selected strategy signal
+            signal = strategy.evaluate(df_5m, strategy_config)
+            if signal.direction != "HOLD":
+                brain_signals["strategy"] = BrainSignal(
+                    direction=signal.direction,
+                    confidence=signal.confidence,
+                    source=f"strategy:{strategy.name}",
+                )
+
+            # Brain 2: Order book analysis
+            try:
+                order_book_data = await self._client.get_order_book(pair)
+                if order_book_data:
+                    ob_signal = self._order_book.analyze(order_book_data)
+                    if ob_signal.is_liquid:
+                        ob_direction = "HOLD"
+                        ob_confidence = 0.5
+                        if ob_signal.imbalance > 0.3:
+                            ob_direction = "BUY"
+                            ob_confidence = 0.5 + ob_signal.imbalance * 0.3
+                        elif ob_signal.imbalance < -0.3:
+                            ob_direction = "SELL"
+                            ob_confidence = 0.5 + abs(ob_signal.imbalance) * 0.3
+                        # Whale detection boosts confidence
+                        if ob_signal.whale_detected:
+                            if ob_signal.whale_side == "bid" and ob_direction == "BUY":
+                                ob_confidence = min(ob_confidence + 0.15, 1.0)
+                            elif ob_signal.whale_side == "ask" and ob_direction == "SELL":
+                                ob_confidence = min(ob_confidence + 0.15, 1.0)
+                        brain_signals["order_book"] = BrainSignal(
+                            direction=ob_direction,
+                            confidence=ob_confidence,
+                            source="order_book",
+                        )
+            except Exception as e:
+                logger.debug("Order book fetch failed for %s: %s", pair, e)
+
+            # Brain 3: Gemini AI analysis
+            try:
+                indicators_dict = {
+                    "rsi": round(float(latest.get("rsi", 0)), 2),
+                    "macd_histogram": round(float(latest.get("macd_histogram", 0)), 4),
+                    "bb_width": round(float(latest.get("bb_width", 0)), 4),
+                    "volume_ratio": round(float(latest.get("volume_ratio", 0)), 2),
+                    "ema_fast": round(float(latest.get("ema_fast", 0)), 2),
+                    "ema_slow": round(float(latest.get("ema_slow", 0)), 2),
+                    "atr": round(float(latest.get("atr", 0)), 2),
+                }
+                gemini_result = await self._gemini_brain.analyze(
+                    pair, current_price, indicators_dict,
+                    regime.regime, self._price_history.get(pair, []),
+                )
+                if gemini_result["direction"] != "HOLD":
+                    brain_signals["gemini_ai"] = BrainSignal(
+                        direction=gemini_result["direction"],
+                        confidence=gemini_result["confidence"],
+                        source="gemini_ai",
+                    )
+            except Exception as e:
+                logger.debug("Gemini brain error: %s", e)
+
+            # Brain 4: Multi-timeframe alignment
+            try:
+                tf_data = {"5m": df_5m}
+                # Fetch 15m and 1h candles
+                df_15m = await self._client.get_historical_ohlcv(pair, "15m", limit=100)
+                if not df_15m.empty and len(df_15m) >= 30:
+                    tf_data["15m"] = df_15m
+                df_1h = await self._client.get_historical_ohlcv(pair, "1h", limit=100)
+                if not df_1h.empty and len(df_1h) >= 30:
+                    tf_data["1h"] = df_1h
+
+                mtf_result = self._mtf_brain.analyze(tf_data)
+                if mtf_result["direction"] != "HOLD":
+                    brain_signals["multi_timeframe"] = BrainSignal(
+                        direction=mtf_result["direction"],
+                        confidence=mtf_result["confidence"],
+                        source="multi_timeframe",
+                    )
+            except Exception as e:
+                logger.debug("Multi-timeframe error: %s", e)
+
+            # Brain 5: Cross-asset correlation
+            corr_signal = self._correlation.get_brain_signal(pair)
+            if corr_signal and corr_signal["direction"] != "HOLD":
+                brain_signals["correlation"] = BrainSignal(
+                    direction=corr_signal["direction"],
+                    confidence=corr_signal.get("confidence", 0.5),
+                    source="correlation",
+                )
+
+            # --- Step 6: Trade Gate — 3/5 consensus ---
+            if len(brain_signals) < 2:
+                logger.debug("Only %d brain signals for %s, need at least 2",
+                           len(brain_signals), pair)
+                return
+
             gate_decision = self._trade_gate.evaluate(brain_signals)
 
             if not gate_decision.approved:
-                logger.debug("Trade gate rejected for %s: %s", pair, gate_decision.reason)
+                logger.debug("Gate rejected %s: %s", pair, gate_decision.reasons)
                 return
 
-            # Risk validation
+            # --- Step 7: Risk validation ---
+            if not self._risk_manager.can_trade(self._trader.get_balance()):
+                logger.info("Risk manager blocked trade for %s", pair)
+                return
+
             position_size = self._risk_manager.get_position_size(
                 balance=self._trader.get_balance(),
-                win_rate=0.55,  # default until we have enough data
-                avg_win=0.008,  # 0.8% avg win
-                avg_loss=0.004,  # 0.4% avg loss
+                win_rate=self._performance_tracker.get_win_rate(strategy.name),
+                avg_win=0.008,
+                avg_loss=0.004,
             )
 
-            if not self._risk_manager.can_trade(self._trader.get_balance()):
-                logger.info("Risk manager says no trade for %s", pair)
-                return
-
-            # Adjust position size if protection says reduce
+            # Reduce size if protection says so
             if protection_status.action == "REDUCE_SIZE":
                 position_size *= 0.5
-                position_size = max(position_size, 10.0)  # still respect $10 floor
+                position_size = max(position_size, 10.0)
 
-            # Execute the trade
-            trade_signal = signal  # use the strategy signal for entry/SL/TP
-            trade = self._trader.execute_signal(trade_signal, pair, position_size)
+            # --- Step 8: Execute the trade ---
+            trade = self._trader.execute_signal(signal, pair, position_size)
 
             if trade:
-                await self._event_bus.emit("trade_opened",
-                                           pair=pair,
-                                           side=trade_signal.direction,
-                                           entry=trade_signal.entry_price,
-                                           sl=trade_signal.stop_loss,
-                                           tp=trade_signal.take_profit,
-                                           size=position_size,
-                                           strategy=trade_signal.strategy_name)
+                # Register trailing stop
+                pos_id = f"{pair}_{signal.entry_price}"
+                self._trailing_stops.register(
+                    pos_id, pair, signal.direction.lower(),
+                    signal.entry_price, signal.stop_loss,
+                )
+
+                await self._event_bus.emit(
+                    "trade_opened",
+                    pair=pair, side=signal.direction,
+                    entry=signal.entry_price,
+                    sl=signal.stop_loss, tp=signal.take_profit,
+                    size=position_size, strategy=strategy.name,
+                )
+
+                logger.info(
+                    "TRADE EXECUTED: %s %s via %s | Entry: $%.2f | "
+                    "SL: $%.2f | TP: $%.2f | Size: $%.2f | "
+                    "Gate: %d brains agreed (%.0f%% conf) | Regime: %s",
+                    signal.direction, pair, strategy.name,
+                    signal.entry_price, signal.stop_loss, signal.take_profit,
+                    position_size, gate_decision.agreeing_brains,
+                    gate_decision.confidence * 100, regime.regime,
+                )
 
         except Exception as e:
-            logger.error("Error processing pair %s: %s", pair, e)
+            logger.error("Error processing %s: %s", pair, e)
 
     async def _check_daily_summary(self):
-        """Send daily summary at end of trading day (00:00 UTC)."""
+        """Send daily summary at midnight UTC."""
         now = datetime.now(timezone.utc)
         today = now.strftime("%Y-%m-%d")
 
         if self._last_daily_summary == today:
             return
 
-        # Only send after midnight UTC
         if now.hour == 0 and now.minute < 5:
             self._last_daily_summary = today
             balance = self._trader.get_balance()
+
+            # Get strategy rankings for the summary
+            rankings = self._performance_tracker.get_rankings()
+            logger.info("Daily strategy rankings: %s", rankings)
+
             await self._notifier.send_daily_summary(
                 date=today,
                 total_trades=self._cycle_count,
-                win_rate=0.0,  # TODO: calculate from DB
-                net_pnl=0.0,  # TODO: calculate from DB
+                win_rate=0.0,
+                net_pnl=0.0,
                 balance=balance,
-                drawdown=0.0,  # TODO: calculate from DB
+                drawdown=0.0,
             )
 
     async def _get_balance(self) -> float:
-        """Get current balance from exchange or config."""
         if self._mode == "paper":
             return self._settings.get("initial_balance", 50.0)
-        # Live mode would fetch from exchange
-        return await self._client.get_balance("USDT")
+        balances = await self._client.get_balance()
+        return balances.get("USDT", 0.0)
 
     async def stop(self):
         """Graceful shutdown."""
         logger.info("Stopping TradingEngine...")
         self._running = False
-
         if self._client:
             await self._client.disconnect()
-
         if self._db:
             await self._db.close()
-
         logger.info("TradingEngine stopped.")

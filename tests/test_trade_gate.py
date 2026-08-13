@@ -1,0 +1,77 @@
+# tests/test_trade_gate.py
+import pytest
+from src.ai.trade_gate import TradeGate, BrainSignal, GateDecision
+
+
+class TestTradeGate:
+
+    def test_approves_when_3_of_5_agree_buy(self):
+        """3+ brains agreeing on BUY -> approved."""
+        gate = TradeGate()
+        signals = {
+            "technical": BrainSignal("BUY", 0.8, "technical"),
+            "order_flow": BrainSignal("BUY", 0.6, "order_flow"),
+            "sentiment": BrainSignal("BUY", 0.7, "sentiment"),
+            "multi_timeframe": BrainSignal("HOLD", 0.3, "multi_timeframe"),
+            "correlation": BrainSignal("HOLD", 0.5, "correlation"),
+        }
+        decision = gate.evaluate(signals)
+        assert decision.approved is True
+        assert decision.direction == "BUY"
+        assert decision.agreeing_brains >= 3
+
+    def test_rejects_when_only_2_agree(self):
+        """Only 2 brains agreeing -> rejected (need 3)."""
+        gate = TradeGate()
+        signals = {
+            "technical": BrainSignal("BUY", 0.8, "technical"),
+            "order_flow": BrainSignal("BUY", 0.6, "order_flow"),
+            "sentiment": BrainSignal("HOLD", 0.3, "sentiment"),
+            "multi_timeframe": BrainSignal("HOLD", 0.3, "multi_timeframe"),
+            "correlation": BrainSignal("HOLD", 0.5, "correlation"),
+        }
+        decision = gate.evaluate(signals)
+        assert decision.approved is False
+
+    def test_rejects_when_strong_opposing_signal(self):
+        """Even with 3 agreeing, a strong OPPOSING signal vetoes."""
+        gate = TradeGate()
+        signals = {
+            "technical": BrainSignal("BUY", 0.8, "technical"),
+            "order_flow": BrainSignal("BUY", 0.6, "order_flow"),
+            "sentiment": BrainSignal("BUY", 0.7, "sentiment"),
+            "multi_timeframe": BrainSignal("SELL", 0.9, "multi_timeframe"),  # strong opposing
+            "correlation": BrainSignal("HOLD", 0.5, "correlation"),
+        }
+        decision = gate.evaluate(signals)
+        assert decision.approved is False
+        assert "opposing" in decision.reasons[0].lower() or "veto" in " ".join(decision.reasons).lower()
+
+    def test_confidence_is_average_of_agreeing_brains(self):
+        """Overall confidence = average of agreeing brains' confidence."""
+        gate = TradeGate()
+        signals = {
+            "technical": BrainSignal("SELL", 0.8, "technical"),
+            "order_flow": BrainSignal("SELL", 0.6, "order_flow"),
+            "sentiment": BrainSignal("SELL", 0.7, "sentiment"),
+            "multi_timeframe": BrainSignal("HOLD", 0.3, "multi_timeframe"),
+            "correlation": BrainSignal("SELL", 0.5, "correlation"),
+        }
+        decision = gate.evaluate(signals)
+        assert decision.approved is True
+        assert decision.direction == "SELL"
+        # Average of 0.8, 0.6, 0.7, 0.5 = 0.65
+        assert abs(decision.confidence - 0.65) < 0.01
+
+    def test_hold_signals_dont_count_as_opposing(self):
+        """HOLD is neutral -- doesn't count for or against."""
+        gate = TradeGate()
+        signals = {
+            "technical": BrainSignal("BUY", 0.8, "technical"),
+            "order_flow": BrainSignal("BUY", 0.7, "order_flow"),
+            "sentiment": BrainSignal("BUY", 0.6, "sentiment"),
+            "multi_timeframe": BrainSignal("HOLD", 0.5, "multi_timeframe"),
+            "correlation": BrainSignal("HOLD", 0.5, "correlation"),
+        }
+        decision = gate.evaluate(signals)
+        assert decision.approved is True  # HOLDs don't veto

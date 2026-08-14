@@ -1,14 +1,14 @@
 # AI Trading Bot — Design Spec
 
 **Date:** 2026-08-13
-**Status:** Draft → Audited (v2) → Autonomous Intelligence (v3)
+**Status:** Draft → Audited (v2) → Autonomous Intelligence (v3) → Full AI Stack (v4)
 **Target:** 2% daily return with ultra-conservative risk management
 **Audit:** 4 critical bugs found and fixed (fee math, min order size, ML cold-start, missing backtest)
 **v3:** Fully autonomous operation — zero human intervention required
 
 ## Overview
 
-A modular, event-driven AI trading bot for cryptocurrency markets. Targets Binance CEX as the primary exchange with DEX arbitrage (Solana) planned for Phase 2. Uses a hybrid AI layer — Gemini for sentiment/regime detection, local ML (XGBoost) for real-time trade signals. Designed for micro accounts ($20-100 starting capital) with aggressive compounding.
+A modular, event-driven AI trading bot for cryptocurrency markets. Targets Binance CEX as the primary exchange with DEX arbitrage (Solana) planned for Phase 8. Uses a full AI engineering stack — Gemini for sentiment/regime detection, XGBoost for ML signals, RAG with ChromaDB for historical pattern memory, embeddings for market state similarity search, agentic AI for autonomous research, and fine-tuned models for optimized inference. Designed for micro accounts ($20-100 starting capital) with aggressive compounding.
 
 **Core principle:** No single trade can hurt you. Profits come from volume × slight edge × compounding.
 
@@ -492,13 +492,16 @@ ai-trading-bot/
 | ccxt | Exchange API (Binance + extensible) |
 | pandas / numpy | Data manipulation |
 | ta | Technical indicators |
-| xgboost / scikit-learn | ML models |
-| google-generativeai | Gemini API |
+| xgboost / scikit-learn | ML models (Phase 4) |
+| google-generativeai | Gemini API + Agentic function-calling (Phase 6) |
+| chromadb | Vector database for RAG memory (Phase 5) |
+| sentence-transformers | Embedding model for market state vectors (Phase 5) |
 | python-telegram-bot | Notifications |
 | websockets | Real-time data feeds |
 | aiosqlite | Async SQLite |
 | pyyaml | Configuration |
-| solders / solana-py | Solana integration (Phase 2) |
+| transformers / peft | Fine-tuning pipeline (Phase 7) |
+| solders / solana-py | Solana integration (Phase 8) |
 
 ## Build Phases
 
@@ -543,7 +546,137 @@ ai-trading-bot/
 - Advanced order types (OCO, trailing stop)
 - Daily/weekly performance reports
 
-### Phase 5: DEX Arbitrage (Future)
+### Phase 5: RAG + Embeddings — Market Memory (After ML stabilized)
+
+The bot gains long-term memory. Instead of analyzing each moment in isolation, it retrieves
+similar historical scenarios before making decisions.
+
+**RAG (Retrieval-Augmented Generation):**
+- ChromaDB vector database stores every trade outcome with full market context
+- Before Gemini analyzes, retrieve top-5 most similar past scenarios
+- Prompt becomes: "Here's the current market + here's what happened the last 5 times it looked like this"
+- Stores and retrieves crypto news articles, correlating headlines with price impact
+- Weekly digest: Gemini reviews all stored outcomes, identifies emerging patterns
+
+**Embeddings:**
+- Embed market snapshots as high-dimensional vectors (price pattern + indicators + volume + regime)
+- Cosine similarity search: find the 10 historical moments most similar to right now
+- Pattern matching at scale — thousands of past states, instant retrieval
+- Embedding model: sentence-transformers for news, custom feature vectors for market states
+- Used as input features for XGBoost (embedding similarity score as a feature)
+
+**Architecture:**
+```
+Current Market State → Embed as Vector → Query ChromaDB
+                                              ↓
+                                    Top-5 Similar Scenarios
+                                              ↓
+                              Gemini Prompt: "Current + History"
+                                              ↓
+                                    Enhanced AI Decision
+```
+
+**Storage schema:**
+```python
+# Each trade outcome stored as a document in ChromaDB
+{
+    "id": "trade_001",
+    "embedding": [0.12, -0.34, ...],  # market state vector
+    "metadata": {
+        "pair": "BTC/USDT",
+        "regime": "RANGING",
+        "rsi": 42.5,
+        "volume_ratio": 1.8,
+        "outcome": "WIN",
+        "pnl_pct": 0.85,
+        "strategy": "grid",
+        "timestamp": "2026-09-15T14:30:00Z"
+    },
+    "document": "BTC ranging at $62k, RSI neutral, volume spike, grid entry → +0.85% win in 23 min"
+}
+```
+
+### Phase 6: Agentic AI — Autonomous Research Agents (After RAG proven)
+
+Each brain evolves from a simple signal generator into an autonomous agent with tools,
+reasoning chains, and self-directed research capabilities.
+
+**Agent Architecture:**
+```
+┌──────────────────────────────────────────────────┐
+│                 ORCHESTRATOR AGENT                │
+│  Coordinates all brain-agents, resolves conflicts │
+│  Manages tool access, enforces time budgets       │
+└──────────┬───────────┬───────────┬───────────────┘
+           ↓           ↓           ↓
+    ┌──────────┐ ┌──────────┐ ┌──────────┐
+    │Technical │ │Sentiment │ │Research  │
+    │  Agent   │ │  Agent   │ │  Agent   │
+    │          │ │          │ │          │
+    │Tools:    │ │Tools:    │ │Tools:    │
+    │-calc_rsi │ │-news_api │ │-web_search│
+    │-fetch_ob │ │-social   │ │-rag_query│
+    │-backtest │ │-fear_greed│ │-compare  │
+    └──────────┘ └──────────┘ └──────────┘
+```
+
+**Agent capabilities:**
+- **Tool use:** Each agent has a toolkit (API calls, calculations, database queries, web search)
+- **Chain-of-thought reasoning:** Agents explain their logic step by step before voting
+- **Self-directed research:** "I notice BTC correlating with gold — let me check gold futures before voting"
+- **Debate protocol:** Agents can challenge each other's reasoning before consensus
+- **Memory:** Agents remember their past decisions and accuracy (via RAG)
+
+**Orchestrator responsibilities:**
+- Time-boxes each agent (max 10 seconds per decision cycle)
+- Detects circular reasoning or agent hallucination
+- Weights agent votes by recent accuracy (hot-hand effect)
+- Logs full reasoning chains for post-analysis
+
+**Implementation: Gemini function-calling + Agent SDK**
+- Each brain-agent is a Gemini model with function declarations
+- Tools are Python functions the agent can call
+- Orchestrator uses multi-turn conversation to coordinate
+- All reasoning chains logged to SQLite for training data
+
+### Phase 7: Fine-Tuned Trading Model (After 90+ days of data)
+
+Train a custom model specifically on this bot's trading patterns and outcomes.
+
+**Why fine-tune:**
+- Generic models (Gemini, XGBoost) know general patterns
+- A fine-tuned model knows THIS bot's specific strengths and weaknesses
+- Learns which signals are most predictive for THIS set of pairs and strategies
+- Smaller, faster, cheaper to run than calling Gemini every time
+
+**Approach:**
+- Distillation: use Gemini's reasoning chains as training data for a smaller model
+- Train on 90+ days of trade outcomes, market states, and agent reasoning
+- Model: fine-tuned small LLM (Gemma 2B or similar) or gradient-boosted ensemble
+- Input: market state vector + RAG context + agent reasoning summary
+- Output: BUY/SELL/HOLD + confidence + reasoning
+- Weekly retraining with walk-forward validation
+
+**Fine-tuning pipeline:**
+```
+90 Days of Data → Feature Engineering → Train/Val/Test Split
+                                              ↓
+                                    Fine-tune Gemma 2B
+                                    (or distill from Gemini)
+                                              ↓
+                                    Validate on held-out week
+                                              ↓
+                              Deploy if better than current system
+                              (A/B test: fine-tuned vs baseline)
+```
+
+**Safety rails:**
+- Fine-tuned model runs alongside (not replacing) the existing system for 2 weeks
+- Only promoted to primary if it outperforms on live paper trades
+- Always keeps Gemini as a fallback/validator
+- Model drift detection: if accuracy drops >5% from training, auto-reverts to baseline
+
+### Phase 8: DEX Arbitrage (Future)
 - Solana wallet integration
 - DEX pool monitoring
 - Atomic swap execution

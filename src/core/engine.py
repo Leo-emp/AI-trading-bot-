@@ -53,6 +53,11 @@ from src.execution.smart_exit import SmartExitManager
 from src.execution.adaptive_sizer import AdaptiveSizer
 from src.notifications.telegram import TelegramNotifier
 from src.storage.database import Database
+from src.ai.embeddings import EmbeddingEngine, MarketSnapshot
+from src.ai.rag_memory import RAGMemory
+from src.ai.ml_model import MLModel
+from src.ai.ml_features import FeatureEngineer
+from src.ai.agent_orchestrator import AgentOrchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +120,17 @@ class TradingEngine:
         self._smart_exit = SmartExitManager()
         self._adaptive_sizer = AdaptiveSizer()
 
+        # Phase 4: ML pipeline
+        self._ml_model = MLModel()
+        self._feature_engineer = FeatureEngineer()
+
+        # Phase 5: RAG memory + embeddings
+        self._embedding_engine = EmbeddingEngine()
+        self._rag_memory = RAGMemory()
+
+        # Phase 6: Agentic AI orchestrator
+        self._agent_orchestrator = AgentOrchestrator()
+
         # Tracking
         self._cycle_count = 0
         self._last_daily_summary = None
@@ -160,6 +176,15 @@ class TradingEngine:
             max_positions=tier.get("max_positions", 3),
         )
 
+        # Phase 5: Initialize RAG memory (starts collecting from day 1)
+        self._rag_memory.initialize()
+
+        # Phase 4: Initialize ML model (loads saved model if exists)
+        self._ml_model.initialize()
+
+        # Phase 6: Initialize agent orchestrator
+        self._agent_orchestrator.initialize()
+
         # Register event handlers
         self._register_events()
 
@@ -202,6 +227,16 @@ class TradingEngine:
                 self._adaptive_sizer.record_loss()
                 # Tell trade filter to start cooldown (avoid revenge trades)
                 self._trade_filter.record_loss()
+
+            # Phase 5: Store trade outcome in RAG memory
+            self._store_trade_memory(trade, kwargs.get("market_snapshot"))
+
+            # Phase 4: Record ML model outcome for drift detection
+            if self._ml_model.is_trained:
+                self._ml_model.record_outcome(trade.pnl > 0)
+
+            # Phase 6: Update agent accuracy tracking
+            self._agent_orchestrator.record_outcomes(trade.pnl > 0)
 
     async def _on_protection(self, **kwargs):
         await self._notifier.send_protection_alert(
@@ -397,7 +432,7 @@ class TradingEngine:
             except Exception as e:
                 logger.debug("Order book fetch failed for %s: %s", pair, e)
 
-            # Brain 3: Gemini AI analysis
+            # Brain 3: Gemini AI analysis (now with RAG memory — Phase 5)
             try:
                 indicators_dict = {
                     "rsi": round(float(latest.get("rsi", 0)), 2),
@@ -408,9 +443,26 @@ class TradingEngine:
                     "ema_slow": round(float(latest.get("ema_slow", 0)), 2),
                     "atr": round(float(latest.get("atr", 0)), 2),
                 }
+
+                # Phase 5: Build RAG context from similar historical trades
+                market_snapshot = MarketSnapshot(
+                    pair=pair, price=current_price,
+                    rsi=indicators_dict["rsi"],
+                    macd_histogram=indicators_dict["macd_histogram"],
+                    bb_width=indicators_dict["bb_width"],
+                    volume_ratio=indicators_dict["volume_ratio"],
+                    ema_fast=indicators_dict["ema_fast"],
+                    ema_slow=indicators_dict["ema_slow"],
+                    atr=indicators_dict["atr"],
+                    regime=regime.regime,
+                    regime_confidence=regime.confidence,
+                )
+                rag_context = self._get_rag_context(pair, market_snapshot)
+
                 gemini_result = await self._gemini_brain.analyze(
                     pair, current_price, indicators_dict,
                     regime.regime, self._price_history.get(pair, []),
+                    rag_context=rag_context,
                 )
                 if gemini_result["direction"] != "HOLD":
                     brain_signals["gemini_ai"] = BrainSignal(
@@ -566,6 +618,65 @@ class TradingEngine:
                 balance=balance,
                 drawdown=0.0,
             )
+
+    def _store_trade_memory(self, trade, market_snapshot=None):
+        """Phase 5: Store a completed trade in RAG memory with full context."""
+        if not self._rag_memory.is_available:
+            return
+
+        try:
+            # Build a market snapshot for embedding
+            snapshot = MarketSnapshot(
+                pair=trade.pair,
+                price=trade.entry_price,
+                regime=getattr(trade, "_regime", "RANGING"),
+            )
+
+            # Generate the embedding vector
+            embedding = self._embedding_engine.embed(snapshot)
+
+            # Build metadata
+            pnl_pct = (trade.pnl / (trade.entry_price * trade.quantity) * 100
+                       if trade.quantity > 0 else 0)
+            metadata = {
+                "pair": trade.pair,
+                "strategy": trade.strategy,
+                "side": trade.side,
+                "outcome": "WIN" if trade.pnl > 0 else "LOSS",
+                "pnl_pct": round(pnl_pct, 4),
+                "entry_price": trade.entry_price,
+                "exit_price": trade.exit_price,
+            }
+
+            # Human-readable summary for Gemini context
+            summary = (
+                f"{trade.pair} {trade.side} via {trade.strategy}: "
+                f"{'WIN' if trade.pnl > 0 else 'LOSS'} "
+                f"({pnl_pct:+.2f}%) — "
+                f"entry ${trade.entry_price:.2f} → exit ${trade.exit_price:.2f}"
+            )
+
+            # Store in ChromaDB
+            trade_id = f"{trade.pair}_{trade.timestamp.strftime('%Y%m%d_%H%M%S')}"
+            self._rag_memory.store_trade(trade_id, embedding, metadata, summary)
+
+        except Exception as e:
+            logger.debug("Failed to store trade memory: %s", e)
+
+    def _get_rag_context(self, pair: str, snapshot: MarketSnapshot) -> str:
+        """Phase 5: Retrieve similar historical scenarios for Gemini context."""
+        if not self._rag_memory.is_available or self._rag_memory.memory_count < 5:
+            return ""
+
+        try:
+            embedding = self._embedding_engine.embed(snapshot)
+            memories = self._rag_memory.retrieve_similar(
+                embedding, n_results=5, pair_filter=pair
+            )
+            return self._rag_memory.format_for_gemini(memories)
+        except Exception as e:
+            logger.debug("RAG retrieval failed: %s", e)
+            return ""
 
     async def _get_balance(self) -> float:
         if self._mode == "paper":

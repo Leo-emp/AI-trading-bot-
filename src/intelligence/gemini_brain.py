@@ -65,11 +65,13 @@ class GeminiBrain:
 
     async def analyze(self, pair: str, current_price: float,
                       indicators: dict, regime: str,
-                      recent_prices: list[float]) -> dict:
+                      recent_prices: list[float],
+                      rag_context: str = "") -> dict:
         """Ask Gemini to analyze current market conditions.
 
         Returns dict with: direction, confidence, reasoning
         Rate-limited to avoid exceeding API quota.
+        rag_context: historical pattern context from RAG memory (Phase 5)
         """
         # Rate limiting — return cached result if too soon
         now = time.time()
@@ -83,7 +85,7 @@ class GeminiBrain:
 
         try:
             prompt = self._build_prompt(pair, current_price, indicators,
-                                         regime, recent_prices)
+                                         regime, recent_prices, rag_context)
             response = await self._call_gemini(prompt)
             result = self._parse_response(response)
 
@@ -99,13 +101,23 @@ class GeminiBrain:
                     "reasoning": f"analysis failed: {e}"}
 
     def _build_prompt(self, pair: str, price: float, indicators: dict,
-                      regime: str, recent_prices: list[float]) -> str:
-        """Build the analysis prompt for Gemini."""
+                      regime: str, recent_prices: list[float],
+                      rag_context: str = "") -> str:
+        """Build the analysis prompt for Gemini.
+
+        If RAG context is provided (Phase 5), includes historical
+        pattern matches so Gemini can learn from past trades.
+        """
         # Calculate simple trend from recent prices
         if len(recent_prices) >= 2:
             change_pct = ((recent_prices[-1] - recent_prices[0]) / recent_prices[0]) * 100
         else:
             change_pct = 0
+
+        # RAG memory section — only included when historical data exists
+        history_section = ""
+        if rag_context:
+            history_section = f"\n{rag_context}\n"
 
         return f"""You are a crypto trading analyst. Analyze this data and give a trading recommendation.
 
@@ -123,11 +135,12 @@ INDICATORS:
 - ATR: {indicators.get('atr', 'N/A')}
 
 RECENT PRICES (last 10): {recent_prices[-10:] if len(recent_prices) >= 10 else recent_prices}
-
+{history_section}
 RULES:
 - This is for a small account ($20-100). Capital preservation is #1 priority.
 - Only recommend BUY or SELL if you are at least 60% confident.
 - Consider fees: 0.15% round trip. Net profit must exceed fees.
+- If historical context shows similar scenarios mostly lost money, be extra cautious.
 - If uncertain, recommend HOLD.
 
 Respond in EXACTLY this JSON format, nothing else:

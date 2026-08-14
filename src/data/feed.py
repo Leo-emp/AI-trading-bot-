@@ -6,6 +6,7 @@
 
 import asyncio
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from typing import Optional, Callable
@@ -20,22 +21,27 @@ class BinanceClient:
     """Wrapper around ccxt's Binance implementation.
 
     Enforces limit-only orders and handles connection management.
-    In paper_mode, uses sandbox endpoints or mocks for testing.
+    Paper trading is handled internally by PaperTrader — this client
+    always connects to real Binance for live market data.
     """
 
     def __init__(self, paper_mode: bool = True,
                  api_key: str = "", secret: str = ""):
-        # Whether to simulate trades or use real money
         self._paper_mode = paper_mode
 
-        # Create the ccxt exchange instance
+        # Read keys from env if not passed directly
+        api_key = api_key or os.getenv("BINANCE_API_KEY", "")
+        secret = secret or os.getenv("BINANCE_API_SECRET", "")
+
+        # Always connect to real Binance (not testnet).
+        # Paper trading is handled by PaperTrader, not the exchange.
         self._exchange = ccxt.binance({
             "apiKey": api_key,
             "secret": secret,
-            "sandbox": paper_mode,
-            "enableRateLimit": True,  # respect Binance rate limits automatically
+            "sandbox": False,
+            "enableRateLimit": True,
             "options": {
-                "defaultType": "spot",  # spot trading only, no futures
+                "defaultType": "spot",
             },
         })
 

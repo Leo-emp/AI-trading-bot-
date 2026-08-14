@@ -53,7 +53,7 @@ class GeminiBrain:
         try:
             import google.generativeai as genai
             genai.configure(api_key=api_key)
-            self._model = genai.GenerativeModel("gemini-2.0-flash")
+            self._model = genai.GenerativeModel("gemini-2.5-flash")
             logger.info("Gemini AI brain initialized")
             return True
         except ImportError:

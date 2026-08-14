@@ -45,11 +45,13 @@ class BaseStrategy(ABC):
         ...
 
     @abstractmethod
-    def evaluate(self, df: pd.DataFrame, config: dict) -> StrategySignal:
+    def evaluate(self, df: pd.DataFrame, config: dict,
+                 pair: str = "default") -> StrategySignal:
         """Analyze data and return a trading signal.
 
         df: OHLCV DataFrame with indicator columns already computed.
         config: strategy-specific parameters from strategies.yaml.
+        pair: trading pair for per-pair cooldown tracking.
         """
         ...
 

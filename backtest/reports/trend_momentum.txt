@@ -1,7 +1,7 @@
-Total trades: 104
-Win rate: 58.7%
-Net P&L: $4.44
-Total fees: $1.5575
-Sharpe ratio: 0.048
-Max drawdown: 1.0%
-Final balance: $104.44
+Total trades: 53
+Win rate: 45.3%
+Net P&L: $5.00
+Total fees: $1.6479
+Sharpe ratio: 0.044
+Max drawdown: 1.1%
+Final balance: $105.00

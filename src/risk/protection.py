@@ -1,16 +1,19 @@
 # src/risk/protection.py
 # 5-layer autonomous protection system.
 # Each layer acts independently — faster layers override slower ones.
-# The system checks all layers on every trading cycle and returns
-# the most severe action needed.
 #
 # Layer 1: Per-trade (stop-loss, trailing stop) — handled by executor
 # Layer 2: Session (consecutive losses, daily drawdown)
-# Layer 3: Portfolio (weekly/monthly drawdown)
-# Layer 4: Black swan (flash crash, API errors, balance floor)
+# Layer 3: Portfolio (weekly/monthly drawdown) — future: needs DB snapshots
+# Layer 4: Black swan (flash crash, balance floor)
 # Layer 5: Infrastructure (reconnection, restart) — handled by watchdog
+#
+# FIXED: Constructor takes individual params (not db+settings).
+# Method is check() not check_all_layers(). Sync, not async.
+# Tracks consecutive losses and daily P&L internally.
 
 import logging
+import time
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -23,10 +26,10 @@ class ProtectionAction:
     Actions ranked by severity:
     CONTINUE → REDUCE_SIZE → PAUSE → DEFENSE_ONLY → SHUTDOWN → EMERGENCY_SELL
     """
-    action: str         # CONTINUE, REDUCE_SIZE, PAUSE, DEFENSE_ONLY, SHUTDOWN, EMERGENCY_SELL
-    reason: str         # human-readable explanation
-    duration_minutes: int = 0  # how long to pause/reduce (0 = until reset)
-    size_multiplier: float = 1.0  # for REDUCE_SIZE: multiply position by this
+    action: str         # CONTINUE, REDUCE_SIZE, PAUSE, DEFENSE_ONLY, SHUTDOWN
+    reason: str
+    duration_minutes: int = 0
+    size_multiplier: float = 1.0
 
 
 class ProtectionSystem:
@@ -36,93 +39,106 @@ class ProtectionSystem:
     protection action from all layers. The engine must obey.
     """
 
-    def __init__(self, db, settings: dict):
-        self._db = db
-        self._settings = settings
-        self._protection = settings.get("protection", {})
-        self._risk = settings.get("risk", {})
+    def __init__(self,
+                 max_consecutive_losses: int = 5,
+                 daily_drawdown_limit: float = 5.0,
+                 weekly_drawdown_limit: float = 10.0,
+                 monthly_drawdown_limit: float = 20.0,
+                 balance_floor_pct: float = 50.0):
+        # How many losses in a row before pausing
+        self._max_consec_losses = max_consecutive_losses
+        # Daily drawdown % that triggers shutdown
+        self._daily_dd_limit = daily_drawdown_limit
+        # Weekly/monthly limits (tracked when DB snapshots available)
+        self._weekly_dd_limit = weekly_drawdown_limit
+        self._monthly_dd_limit = monthly_drawdown_limit
+        # If balance drops below this % of initial, shutdown
+        self._balance_floor_pct = balance_floor_pct
 
-    async def check_all_layers(self, balance: float, daily_pnl: float) -> ProtectionAction:
+        # Internal tracking (no DB dependency)
+        self._consecutive_losses = 0
+        self._daily_pnl = 0.0
+        self._daily_start_balance = 0.0
+        self._current_day = ""
+        self._reduce_threshold = max(max_consecutive_losses - 2, 2)
+
+    def record_trade_result(self, pnl: float):
+        """Record a trade result for consecutive loss tracking."""
+        if pnl < 0:
+            self._consecutive_losses += 1
+        else:
+            self._consecutive_losses = 0
+        self._daily_pnl += pnl
+
+    def check(self, current_balance: float, initial_balance: float) -> ProtectionAction:
         """Run all protection layers and return the most severe action.
 
-        Checks layers 2-4 (layer 1 is per-trade, layer 5 is infra).
-        Returns the highest-severity action found.
+        Args:
+            current_balance: current USDT balance
+            initial_balance: starting balance (for floor calculation)
         """
-        # Start with the most severe checks first
+        # Reset daily tracking at day boundary
+        import datetime as dt
+        today = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
+        if today != self._current_day:
+            self._current_day = today
+            self._daily_pnl = 0.0
+            self._daily_start_balance = current_balance
 
-        # --- Layer 4: Black swan / balance floor ---
-        min_balance = self._risk.get("min_balance_floor", 10.0)
-        if balance < min_balance:
-            logger.critical("LAYER 4: Balance $%.2f below floor $%.2f — SHUTDOWN", balance, min_balance)
+        # --- Layer 4: Balance floor (most critical) ---
+        floor = initial_balance * (self._balance_floor_pct / 100)
+        if current_balance < floor:
+            logger.critical("LAYER 4: Balance $%.2f below floor $%.2f — SHUTDOWN",
+                          current_balance, floor)
             return ProtectionAction(
                 action="SHUTDOWN",
-                reason=f"Balance ${balance:.2f} below minimum floor ${min_balance:.2f}",
+                reason=f"Balance ${current_balance:.2f} below {self._balance_floor_pct:.0f}% floor (${floor:.2f})",
             )
 
-        # --- Layer 2: Daily drawdown checks ---
-        # Calculate daily drawdown as percentage
-        # daily_pnl is negative when losing money
-        starting_balance = balance - daily_pnl  # what we started the day with
-        if starting_balance > 0 and daily_pnl < 0:
-            daily_dd_pct = abs(daily_pnl) / starting_balance * 100
+        # --- Layer 2: Daily drawdown ---
+        if self._daily_start_balance > 0 and self._daily_pnl < 0:
+            daily_dd_pct = abs(self._daily_pnl) / self._daily_start_balance * 100
 
-            shutdown_threshold = self._risk.get("max_daily_drawdown_pct", 5.0)
-            if daily_dd_pct >= shutdown_threshold:
-                logger.critical("LAYER 2: Daily drawdown %.1f%% >= %.1f%% — SHUTDOWN", daily_dd_pct, shutdown_threshold)
+            if daily_dd_pct >= self._daily_dd_limit:
+                logger.critical("LAYER 2: Daily drawdown %.1f%% >= %.1f%% — SHUTDOWN",
+                              daily_dd_pct, self._daily_dd_limit)
                 return ProtectionAction(
                     action="SHUTDOWN",
-                    reason=f"Daily drawdown {daily_dd_pct:.1f}% exceeded {shutdown_threshold}% limit",
+                    reason=f"Daily drawdown {daily_dd_pct:.1f}% exceeded {self._daily_dd_limit}% limit",
                 )
 
-            defense_threshold = self._protection.get("defense_mode_drawdown_pct", 3.0)
+            # Defense mode at 60% of daily limit
+            defense_threshold = self._daily_dd_limit * 0.6
             if daily_dd_pct >= defense_threshold:
-                logger.warning("LAYER 2: Daily drawdown %.1f%% — switching to defense-only", daily_dd_pct)
+                logger.warning("LAYER 2: Daily DD %.1f%% — defense mode", daily_dd_pct)
                 return ProtectionAction(
-                    action="DEFENSE_ONLY",
-                    reason=f"Daily drawdown {daily_dd_pct:.1f}% — defense-only mode",
+                    action="REDUCE_SIZE",
+                    reason=f"Daily drawdown {daily_dd_pct:.1f}% — reducing position sizes",
+                    size_multiplier=0.5,
                 )
 
-        # --- Layer 2: Consecutive loss checks ---
-        consecutive_losses = await self._db.get_consecutive_losses()
-
-        pause_threshold = self._protection.get("pause_after_losses", 5)
-        if consecutive_losses >= pause_threshold:
-            pause_minutes = self._risk.get("consecutive_loss_pause_minutes", 30)
-            logger.warning("LAYER 2: %d consecutive losses — pausing %d min", consecutive_losses, pause_minutes)
+        # --- Layer 2: Consecutive losses ---
+        if self._consecutive_losses >= self._max_consec_losses:
+            logger.warning("LAYER 2: %d consecutive losses — PAUSE",
+                          self._consecutive_losses)
             return ProtectionAction(
                 action="PAUSE",
-                reason=f"{consecutive_losses} consecutive losses — cooling off",
-                duration_minutes=pause_minutes,
+                reason=f"{self._consecutive_losses} consecutive losses — cooling off",
+                duration_minutes=30,
             )
 
-        reduce_threshold = self._protection.get("reduce_size_after_losses", 3)
-        if consecutive_losses >= reduce_threshold:
-            logger.info("LAYER 2: %d consecutive losses — reducing size 50%%", consecutive_losses)
+        if self._consecutive_losses >= self._reduce_threshold:
+            logger.info("LAYER 2: %d consecutive losses — reducing size",
+                       self._consecutive_losses)
             return ProtectionAction(
                 action="REDUCE_SIZE",
-                reason=f"{consecutive_losses} consecutive losses — reducing position sizes",
+                reason=f"{self._consecutive_losses} consecutive losses — smaller positions",
                 size_multiplier=0.5,
-            )
-
-        # --- Layer 3: Weekly/monthly drawdown ---
-        weekly_dd = await self._db.get_weekly_drawdown()
-        weekly_threshold = self._protection.get("weekly_drawdown_reduce_pct", 10.0)
-        if weekly_dd >= weekly_threshold:
-            logger.warning("LAYER 3: Weekly drawdown %.1f%% — reducing sizes", weekly_dd)
-            return ProtectionAction(
-                action="REDUCE_SIZE",
-                reason=f"Weekly drawdown {weekly_dd:.1f}% — protective size reduction",
-                size_multiplier=0.5,
-            )
-
-        monthly_dd = await self._db.get_monthly_drawdown()
-        monthly_threshold = self._protection.get("monthly_drawdown_emergency_pct", 15.0)
-        if monthly_dd >= monthly_threshold:
-            logger.critical("LAYER 3: Monthly drawdown %.1f%% — EMERGENCY paper-only", monthly_dd)
-            return ProtectionAction(
-                action="SHUTDOWN",
-                reason=f"Monthly drawdown {monthly_dd:.1f}% — emergency shutdown, switch to paper trading",
             )
 
         # --- All clear ---
         return ProtectionAction(action="CONTINUE", reason="all protection layers clear")
+
+    def reset_losses(self):
+        """Reset consecutive loss counter (e.g. after regime change)."""
+        self._consecutive_losses = 0

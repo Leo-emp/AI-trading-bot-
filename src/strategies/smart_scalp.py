@@ -32,28 +32,31 @@ class SmartScalpStrategy(BaseStrategy):
 
     def __init__(self):
         super().__init__()
-        # Cooldown uses call counter, not candle count (window resets break len(df))
-        self._last_trade_call = -999
-        self._call_count = 0
+        # Per-pair cooldown — prevents BTC trade from blocking ETH signals
+        self._last_trade_call: dict[str, int] = {}
+        self._call_count: dict[str, int] = {}
 
     @property
     def name(self) -> str:
         # Keep original name so config lookup and strategy selector still work
         return "smart_scalp"
 
-    def evaluate(self, df: pd.DataFrame, config: dict) -> StrategySignal:
+    def evaluate(self, df: pd.DataFrame, config: dict,
+                 pair: str = "default") -> StrategySignal:
         # Need enough candles for Donchian (40) + ADX (28) warmup
         if len(df) < 20:
             return StrategySignal("HOLD", 0.0, strategy_name=self.name,
                                   reasons=["insufficient data"])
 
         latest = df.iloc[-1]
-        self._call_count += 1
+        # Per-pair call counter for cooldown tracking
+        self._call_count[pair] = self._call_count.get(pair, 0) + 1
 
         # --- Cooldown: 18 candles (1.5 hours) between trades ---
         # Breakout zones are choppy -- prevents rapid-fire entries
         cooldown = config.get("cooldown_candles", 18)
-        if self._call_count - self._last_trade_call < cooldown:
+        last_trade = self._last_trade_call.get(pair, -999)
+        if self._call_count[pair] - last_trade < cooldown:
             return StrategySignal("HOLD", 0.0, strategy_name=self.name,
                                   reasons=["cooldown active"])
 
@@ -142,7 +145,7 @@ class SmartScalpStrategy(BaseStrategy):
 
         if buy_score >= min_score and buy_score > sell_score:
             confidence = min(buy_score / 5, 1.0)
-            self._last_trade_call = self._call_count
+            self._last_trade_call[pair] = self._call_count[pair]
             return StrategySignal(
                 direction="BUY", confidence=confidence,
                 entry_price=close,
@@ -153,7 +156,7 @@ class SmartScalpStrategy(BaseStrategy):
 
         if sell_score >= min_score and sell_score > buy_score:
             confidence = min(sell_score / 5, 1.0)
-            self._last_trade_call = self._call_count
+            self._last_trade_call[pair] = self._call_count[pair]
             return StrategySignal(
                 direction="SELL", confidence=confidence,
                 entry_price=close,

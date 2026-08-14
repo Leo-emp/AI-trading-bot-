@@ -48,11 +48,15 @@ class PaperTrader:
                  maker_fee_rate: float = 0.00075,
                  min_order_size: float = 10.0,
                  max_positions: int = 3,
+                 max_per_pair: int = 2,
                  time_exit_hours: float = 4.0):
         self._balance = initial_balance
         self._fee_rate = maker_fee_rate
         self._min_order = min_order_size
         self._max_positions = max_positions
+        # Cap per-pair concentration — allows scaling in (2 entries)
+        # but prevents going all-in on one asset with a $100 account
+        self._max_per_pair = max_per_pair
         self._time_exit = time_exit_hours * 3600  # convert to seconds
         self._positions: list[OpenPosition] = []
         self._trade_history: list[Trade] = []
@@ -81,6 +85,13 @@ class PaperTrader:
 
         if len(self._positions) >= self._max_positions:
             logger.info("Rejected: max positions (%d) reached", self._max_positions)
+            return None
+
+        # Cap per-pair positions — allows scaling in but limits concentration
+        pair_count = sum(1 for pos in self._positions if pos.pair == pair)
+        if pair_count >= self._max_per_pair:
+            logger.info("Rejected: already have %d/%d positions on %s",
+                         pair_count, self._max_per_pair, pair)
             return None
 
         if position_size > self._balance:

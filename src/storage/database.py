@@ -25,7 +25,7 @@ class Database:
         # Connection handle — set by init()
         self._conn: Optional[aiosqlite.Connection] = None
 
-    async def init(self):
+    async def initialize(self):
         """Create tables if they don't exist and open connection."""
         self._conn = await aiosqlite.connect(self._db_path)
         # Enable WAL mode for better concurrent read performance
@@ -79,7 +79,7 @@ class Database:
         if self._conn:
             await self._conn.close()
 
-    async def log_trade(self, trade: Trade):
+    async def save_trade(self, trade: Trade):
         """Insert a trade record."""
         await self._conn.execute(
             """INSERT INTO trades

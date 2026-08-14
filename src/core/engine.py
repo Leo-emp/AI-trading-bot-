@@ -193,6 +193,8 @@ class TradingEngine:
             await self._db.save_trade(trade)
             # Record in performance tracker
             self._performance_tracker.record_trade(trade.strategy, trade.pnl)
+            # Feed protection system — tracks consecutive losses + daily P&L
+            self._protection.record_trade_result(trade.pnl)
             # Feed adaptive sizer — bigger bets when winning, smaller when losing
             if trade.pnl > 0:
                 self._adaptive_sizer.record_win()
@@ -281,6 +283,16 @@ class TradingEngine:
                 logger.warning("Not enough 5m data for %s", pair)
                 return
 
+            # Check candle freshness — reject stale data
+            import time as _time
+            latest_ts = df_5m.iloc[-1]["timestamp"]
+            if hasattr(latest_ts, "timestamp"):
+                candle_age = _time.time() - latest_ts.timestamp()
+                if candle_age > 600:  # older than 10 minutes
+                    logger.warning("Stale candle data for %s (%.0fs old), skipping",
+                                  pair, candle_age)
+                    return
+
             # Compute indicators on primary timeframe
             df_5m = self._indicator_engine.compute_all(df_5m)
             current_price = df_5m.iloc[-1]["close"]
@@ -348,8 +360,8 @@ class TradingEngine:
             # --- Step 5: Collect all 5 brain signals ---
             brain_signals = {}
 
-            # Brain 1: Selected strategy signal
-            signal = strategy.evaluate(df_5m, strategy_config)
+            # Brain 1: Selected strategy signal (pair passed for per-pair cooldown)
+            signal = strategy.evaluate(df_5m, strategy_config, pair=pair)
             if signal.direction != "HOLD":
                 brain_signals["strategy"] = BrainSignal(
                     direction=signal.direction,

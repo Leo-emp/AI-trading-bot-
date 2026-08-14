@@ -94,13 +94,13 @@ class BacktestEngine:
             )
             all_closed_trades.extend(closed)
 
-            # Ask strategy for a signal
-            signal = strategy.evaluate(window, config)
+            # Ask strategy for a signal (pass pair for per-pair cooldown)
+            signal = strategy.evaluate(window, config, pair=pair)
 
             # Execute if we get a BUY or SELL
             if signal.direction != "HOLD":
-                position_size = min(self._min_order, trader.get_balance() * 0.25)
-                position_size = max(position_size, self._min_order)
+                # 25% of balance per trade, but never below $10 minimum
+                position_size = max(self._min_order, trader.get_balance() * 0.25)
 
                 if position_size <= trader.get_balance():
                     trader.execute_signal(signal, pair, position_size)

@@ -42,25 +42,29 @@ class MeanReversionStrategy(BaseStrategy):
 
     def __init__(self):
         super().__init__()
-        self._last_trade_call = -999
-        self._call_count = 0
+        # Per-pair cooldown — prevents BTC trade from blocking ETH signals
+        self._last_trade_call: dict[str, int] = {}
+        self._call_count: dict[str, int] = {}
 
     @property
     def name(self) -> str:
         return "mean_reversion"
 
-    def evaluate(self, df: pd.DataFrame, config: dict) -> StrategySignal:
+    def evaluate(self, df: pd.DataFrame, config: dict,
+                 pair: str = "default") -> StrategySignal:
         if len(df) < 30:
             return StrategySignal("HOLD", 0.0, strategy_name=self.name,
                                   reasons=["insufficient data"])
 
         latest = df.iloc[-1]
         prev = df.iloc[-2]
-        self._call_count += 1
+        # Per-pair call counter for cooldown tracking
+        self._call_count[pair] = self._call_count.get(pair, 0) + 1
 
         # --- Cooldown: 12 candles (1 hour) between entries ---
         cooldown = config.get("cooldown_candles", 12)
-        if self._call_count - self._last_trade_call < cooldown:
+        last_trade = self._last_trade_call.get(pair, -999)
+        if self._call_count[pair] - last_trade < cooldown:
             return StrategySignal("HOLD", 0.0, strategy_name=self.name,
                                   reasons=["cooldown active"])
 
@@ -174,7 +178,7 @@ class MeanReversionStrategy(BaseStrategy):
 
         if buy_score >= min_score and buy_score > sell_score:
             confidence = min(buy_score / 7, 1.0)
-            self._last_trade_call = self._call_count
+            self._last_trade_call[pair] = self._call_count[pair]
             return StrategySignal(
                 direction="BUY", confidence=confidence,
                 entry_price=close,
@@ -185,7 +189,7 @@ class MeanReversionStrategy(BaseStrategy):
 
         if sell_score >= min_score and sell_score > buy_score:
             confidence = min(sell_score / 7, 1.0)
-            self._last_trade_call = self._call_count
+            self._last_trade_call[pair] = self._call_count[pair]
             return StrategySignal(
                 direction="SELL", confidence=confidence,
                 entry_price=close,

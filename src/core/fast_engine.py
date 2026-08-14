@@ -375,8 +375,8 @@ class FastEngine:
         # Step 6: Collect 5 brain signals
         brain_signals = {}
 
-        # Brain 1: Strategy signal
-        signal = strategy.evaluate(df_5m, strategy_config)
+        # Brain 1: Strategy signal (pair passed for per-pair cooldown)
+        signal = strategy.evaluate(df_5m, strategy_config, pair=pair)
         if signal.direction != "HOLD":
             brain_signals["strategy"] = BrainSignal(
                 direction=signal.direction,
@@ -627,6 +627,8 @@ class FastEngine:
         if trade:
             await self._db.save_trade(trade)
             self._performance_tracker.record_trade(trade.strategy, trade.pnl)
+            # Feed protection system — tracks consecutive losses + daily P&L
+            self._protection.record_trade_result(trade.pnl)
             if trade.pnl > 0:
                 self._adaptive_sizer.record_win()
             else:

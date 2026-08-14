@@ -1,0 +1,506 @@
+<title>Trading Bot Architecture</title>
+<style>
+:root {
+  --bg: #0C1222;
+  --surface: #14202E;
+  --text: #B8C8D6;
+  --text-dim: #566878;
+  --text-bright: #E4EAF0;
+  --blue: #4A90D9;
+  --indigo: #6366F1;
+  --amber: #D4982F;
+  --emerald: #2FBF8A;
+  --rose: #D9565F;
+  --violet: #9B7FD4;
+  --connector: #2E4458;
+}
+
+*,*::before,*::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  padding: 2rem 1.25rem;
+  min-height: 100vh;
+}
+
+.page { max-width: 1120px; margin: 0 auto; }
+
+header { text-align: center; margin-bottom: 1.5rem; }
+.eyebrow {
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  color: var(--amber);
+  margin-bottom: 0.3rem;
+}
+h1 {
+  font-family: ui-monospace, 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 1.35rem;
+  font-weight: 300;
+  color: var(--text-bright);
+  letter-spacing: -0.01em;
+}
+.subtitle {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  margin-top: 0.3rem;
+}
+
+.diagram-wrap {
+  overflow-x: auto;
+  margin-bottom: 1.25rem;
+  -webkit-overflow-scrolling: touch;
+}
+svg.arch {
+  display: block;
+  width: 100%;
+  min-width: 700px;
+  height: auto;
+}
+.node rect { transition: filter 0.2s ease; cursor: default; }
+.node:hover rect { filter: brightness(1.4) saturate(1.15); }
+.node text { pointer-events: none; user-select: none; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .flow-dash { stroke-dasharray: 6 4; animation: flowPulse 1.4s linear infinite; }
+  @keyframes flowPulse { to { stroke-dashoffset: -10; } }
+  .gate-glow { animation: gateBreath 3s ease-in-out infinite; }
+  @keyframes gateBreath {
+    0%,100% { filter: drop-shadow(0 0 3px rgba(47,191,138,0.15)); }
+    50% { filter: drop-shadow(0 0 8px rgba(47,191,138,0.35)); }
+  }
+}
+
+.prot-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.55rem 0.9rem;
+  background: #160D0D;
+  border: 1px solid #301515;
+  border-radius: 7px;
+  margin-bottom: 1.25rem;
+  overflow-x: auto;
+  font-size: 0.68rem;
+  font-family: ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
+  -webkit-overflow-scrolling: touch;
+}
+.prot-label {
+  font-weight: 700;
+  color: var(--rose);
+  letter-spacing: 0.1em;
+  white-space: nowrap;
+  margin-right: 0.3rem;
+}
+.prot-item {
+  color: var(--text-dim);
+  white-space: nowrap;
+  padding: 0.18rem 0.5rem;
+  background: #1C0E0E;
+  border-radius: 3px;
+  border: 1px solid #2A1414;
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 0.6rem;
+  margin-bottom: 1.25rem;
+}
+.stat {
+  background: var(--surface);
+  border: 1px solid #1C2E3E;
+  border-radius: 5px;
+  padding: 0.6rem 0.7rem;
+  text-align: center;
+}
+.stat-val {
+  display: block;
+  font-family: ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text-bright);
+  font-variant-numeric: tabular-nums;
+}
+.stat-lbl {
+  display: block;
+  font-size: 0.6rem;
+  color: var(--text-dim);
+  margin-top: 0.12rem;
+  letter-spacing: 0.03em;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.9rem;
+  justify-content: center;
+  font-size: 0.68rem;
+  color: var(--text-dim);
+}
+.legend-item { display: flex; align-items: center; gap: 0.3rem; }
+.legend-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+
+.footer {
+  text-align: center;
+  margin-top: 1.5rem;
+  font-size: 0.6rem;
+  color: var(--text-dim);
+  opacity: 0.6;
+}
+.footer a { color: var(--blue); text-decoration: none; }
+</style>
+
+<div class="page">
+  <header>
+    <p class="eyebrow">MULTI-AGENT AI TRADING SYSTEM</p>
+    <h1>System Architecture</h1>
+    <p class="subtitle">Decision pipeline: 6 AI/ML techniques, 5-brain consensus, 5-layer autonomous protection</p>
+  </header>
+
+  <div class="diagram-wrap">
+    <svg class="arch" viewBox="0 0 1050 560" xmlns="http://www.w3.org/2000/svg">
+
+      <!-- Background grid -->
+      <defs>
+        <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse">
+          <path d="M24 0L0 0 0 24" fill="none" stroke="#141E2C" stroke-width="0.4"/>
+        </pattern>
+      </defs>
+      <rect width="100%" height="100%" fill="url(#grid)"/>
+
+      <!-- === LAYER LABELS (rotated, left edge) === -->
+      <text transform="rotate(-90,22,109)" x="22" y="109" text-anchor="middle"
+            fill="#6366F1" font-size="8" font-weight="700" letter-spacing="0.14em"
+            font-family="system-ui" opacity="0.55">DATA INGESTION</text>
+      <text transform="rotate(-90,22,225)" x="22" y="225" text-anchor="middle"
+            fill="#D4982F" font-size="8" font-weight="700" letter-spacing="0.14em"
+            font-family="system-ui" opacity="0.55">ANALYSIS</text>
+      <text transform="rotate(-90,22,342)" x="22" y="342" text-anchor="middle"
+            fill="#2FBF8A" font-size="8" font-weight="700" letter-spacing="0.14em"
+            font-family="system-ui" opacity="0.55">CONSENSUS</text>
+      <text transform="rotate(-90,22,446)" x="22" y="446" text-anchor="middle"
+            fill="#D9565F" font-size="8" font-weight="700" letter-spacing="0.14em"
+            font-family="system-ui" opacity="0.55">EXECUTION</text>
+
+      <!-- === EXCHANGE INPUT === -->
+      <g class="node">
+        <title>Binance API: REST + WebSocket connection for 12 crypto pairs across 3 timeframes</title>
+        <rect x="310" y="10" width="180" height="40" rx="6"
+              fill="#142540" stroke="#4A90D9" stroke-width="1.5"/>
+        <text x="400" y="35" text-anchor="middle" fill="#E4EAF0"
+              font-size="12" font-weight="600" font-family="system-ui">BINANCE API</text>
+      </g>
+      <text x="400" y="62" text-anchor="middle" fill="#566878" font-size="7.5"
+            font-family="ui-monospace, monospace">12 pairs · REST + WebSocket</text>
+
+      <!-- === DATA LAYER (4 boxes, centered at x=400) === -->
+      <!-- total: 4×130 + 3×16 = 568, start: 400-284=116 -->
+      <g class="node">
+        <title>OHLCV Candles: Open/High/Low/Close/Volume price data from Binance</title>
+        <rect x="116" y="88" width="130" height="42" rx="5"
+              fill="#181840" stroke="#6366F1" stroke-width="1.4"/>
+        <text x="181" y="107" text-anchor="middle" fill="#E4EAF0"
+              font-size="10.5" font-weight="600" font-family="system-ui">OHLCV Candles</text>
+        <text x="181" y="121" text-anchor="middle" fill="#566878"
+              font-size="7.5" font-family="ui-monospace, monospace">3 timeframes</text>
+      </g>
+      <g class="node">
+        <title>Order Book: Real-time depth data with whale detection and imbalance tracking</title>
+        <rect x="262" y="88" width="130" height="42" rx="5"
+              fill="#181840" stroke="#6366F1" stroke-width="1.4"/>
+        <text x="327" y="107" text-anchor="middle" fill="#E4EAF0"
+              font-size="10.5" font-weight="600" font-family="system-ui">Order Book</text>
+        <text x="327" y="121" text-anchor="middle" fill="#566878"
+              font-size="7.5" font-family="ui-monospace, monospace">depth + whales</text>
+      </g>
+      <g class="node">
+        <title>Technical Indicators: RSI, MACD, Bollinger Bands, ATR, ADX, EMA computations</title>
+        <rect x="408" y="88" width="130" height="42" rx="5"
+              fill="#181840" stroke="#6366F1" stroke-width="1.4"/>
+        <text x="473" y="107" text-anchor="middle" fill="#E4EAF0"
+              font-size="10.5" font-weight="600" font-family="system-ui">Indicators</text>
+        <text x="473" y="121" text-anchor="middle" fill="#566878"
+              font-size="7.5" font-family="ui-monospace, monospace">RSI MACD BB ATR</text>
+      </g>
+      <g class="node">
+        <title>Multi-Timeframe: Cross-timeframe alignment analysis on 5m, 15m, 1h candles</title>
+        <rect x="554" y="88" width="130" height="42" rx="5"
+              fill="#181840" stroke="#6366F1" stroke-width="1.4"/>
+        <text x="619" y="107" text-anchor="middle" fill="#E4EAF0"
+              font-size="10.5" font-weight="600" font-family="system-ui">Multi-Timeframe</text>
+        <text x="619" y="121" text-anchor="middle" fill="#566878"
+              font-size="7.5" font-family="ui-monospace, monospace">5m · 15m · 1h</text>
+      </g>
+
+      <!-- === BRAIN LAYER (6 boxes, centered at x=400) === -->
+      <!-- total: 6×100 + 5×13 = 665, start: 400-332=68 -->
+      <g class="node">
+        <title>Brain 1 — Technical Signals: Rule-based RSI, MACD, Bollinger Band analysis</title>
+        <rect x="68" y="195" width="100" height="60" rx="5"
+              fill="#2A1E10" stroke="#D4982F" stroke-width="1.4"/>
+        <text x="118" y="216" text-anchor="middle" fill="#E4EAF0"
+              font-size="10" font-weight="600" font-family="system-ui">Technical</text>
+        <text x="118" y="229" text-anchor="middle" fill="#E4EAF0"
+              font-size="10" font-weight="600" font-family="system-ui">Signals</text>
+        <text x="118" y="248" text-anchor="middle" fill="#566878"
+              font-size="7.5" font-family="ui-monospace, monospace">BRAIN 1</text>
+      </g>
+      <g class="node">
+        <title>Brain 2 — Order Flow: Statistical order book imbalance and whale pressure analysis</title>
+        <rect x="181" y="195" width="100" height="60" rx="5"
+              fill="#2A1E10" stroke="#D4982F" stroke-width="1.4"/>
+        <text x="231" y="216" text-anchor="middle" fill="#E4EAF0"
+              font-size="10" font-weight="600" font-family="system-ui">Order</text>
+        <text x="231" y="229" text-anchor="middle" fill="#E4EAF0"
+              font-size="10" font-weight="600" font-family="system-ui">Flow</text>
+        <text x="231" y="248" text-anchor="middle" fill="#566878"
+              font-size="7.5" font-family="ui-monospace, monospace">BRAIN 2</text>
+      </g>
+      <g class="node">
+        <title>Brain 3 — Gemini AI + RAG: LLM market analysis augmented with historical trade memory</title>
+        <rect x="294" y="195" width="100" height="60" rx="5"
+              fill="#2A1E10" stroke="#D4982F" stroke-width="1.4"/>
+        <text x="344" y="216" text-anchor="middle" fill="#E4EAF0"
+              font-size="10" font-weight="600" font-family="system-ui">Gemini AI</text>
+        <text x="344" y="229" text-anchor="middle" fill="#E4EAF0"
+              font-size="10" font-weight="600" font-family="system-ui">+ RAG</text>
+        <text x="344" y="248" text-anchor="middle" fill="#566878"
+              font-size="7.5" font-family="ui-monospace, monospace">BRAIN 3</text>
+      </g>
+      <g class="node">
+        <title>Brain 4 — Multi-TF Alignment: Cross-timeframe trend agreement scoring</title>
+        <rect x="407" y="195" width="100" height="60" rx="5"
+              fill="#2A1E10" stroke="#D4982F" stroke-width="1.4"/>
+        <text x="457" y="216" text-anchor="middle" fill="#E4EAF0"
+              font-size="10" font-weight="600" font-family="system-ui">Multi-TF</text>
+        <text x="457" y="229" text-anchor="middle" fill="#E4EAF0"
+              font-size="10" font-weight="600" font-family="system-ui">Alignment</text>
+        <text x="457" y="248" text-anchor="middle" fill="#566878"
+              font-size="7.5" font-family="ui-monospace, monospace">BRAIN 4</text>
+      </g>
+      <g class="node">
+        <title>Brain 5 — Cross-Asset Correlation: BTC/ETH/altcoin correlation and systemic risk tracking</title>
+        <rect x="520" y="195" width="100" height="60" rx="5"
+              fill="#2A1E10" stroke="#D4982F" stroke-width="1.4"/>
+        <text x="570" y="216" text-anchor="middle" fill="#E4EAF0"
+              font-size="10" font-weight="600" font-family="system-ui">Cross-Asset</text>
+        <text x="570" y="229" text-anchor="middle" fill="#E4EAF0"
+              font-size="10" font-weight="600" font-family="system-ui">Correlation</text>
+        <text x="570" y="248" text-anchor="middle" fill="#566878"
+              font-size="7.5" font-family="ui-monospace, monospace">BRAIN 5</text>
+      </g>
+      <g class="node">
+        <title>Brain 6 — ML Signal (XGBoost): 30-feature binary classifier predicting trade profitability</title>
+        <rect x="633" y="195" width="100" height="60" rx="5"
+              fill="#2A1E10" stroke="#D4982F" stroke-width="1.4"/>
+        <text x="683" y="216" text-anchor="middle" fill="#E4EAF0"
+              font-size="10" font-weight="600" font-family="system-ui">ML Signal</text>
+        <text x="683" y="229" text-anchor="middle" fill="#E4EAF0"
+              font-size="10" font-weight="600" font-family="system-ui">XGBoost</text>
+        <text x="683" y="248" text-anchor="middle" fill="#566878"
+              font-size="7.5" font-family="ui-monospace, monospace">BRAIN 6</text>
+      </g>
+
+      <!-- === TRADE GATE === -->
+      <g class="node gate-glow">
+        <title>Trade Gate: Requires 4/5 brain consensus to execute. Vetoes on strong opposing signals (confidence > 0.65)</title>
+        <rect x="280" y="318" width="240" height="48" rx="8"
+              fill="#0C2A1E" stroke="#2FBF8A" stroke-width="2"/>
+        <text x="400" y="339" text-anchor="middle" fill="#E4EAF0"
+              font-size="13" font-weight="700" font-family="system-ui">TRADE GATE</text>
+        <text x="400" y="356" text-anchor="middle" fill="#566878"
+              font-size="8.5" font-family="ui-monospace, monospace">4/5 consensus + veto check</text>
+      </g>
+
+      <!-- === EXECUTION LAYER (3 boxes, centered at x=400) === -->
+      <!-- total: 3×130 + 2×20 = 430, start: 400-215=185 -->
+      <g class="node">
+        <title>Risk Manager: Quarter-Kelly position sizing, balance checks, max position limits</title>
+        <rect x="185" y="425" width="130" height="42" rx="5"
+              fill="#2A1218" stroke="#D9565F" stroke-width="1.4"/>
+        <text x="250" y="444" text-anchor="middle" fill="#E4EAF0"
+              font-size="10.5" font-weight="600" font-family="system-ui">Risk Manager</text>
+        <text x="250" y="458" text-anchor="middle" fill="#566878"
+              font-size="7.5" font-family="ui-monospace, monospace">quarter-Kelly sizing</text>
+      </g>
+      <g class="node">
+        <title>Smart Exit: 4-phase trailing stop system (normal → breakeven → trail → tight)</title>
+        <rect x="335" y="425" width="130" height="42" rx="5"
+              fill="#2A1218" stroke="#D9565F" stroke-width="1.4"/>
+        <text x="400" y="444" text-anchor="middle" fill="#E4EAF0"
+              font-size="10.5" font-weight="600" font-family="system-ui">Smart Exit</text>
+        <text x="400" y="458" text-anchor="middle" fill="#566878"
+              font-size="7.5" font-family="ui-monospace, monospace">4-phase trailing</text>
+      </g>
+      <g class="node">
+        <title>Order Executor: Limit orders only (never market), maker fee optimization</title>
+        <rect x="485" y="425" width="130" height="42" rx="5"
+              fill="#2A1218" stroke="#D9565F" stroke-width="1.4"/>
+        <text x="550" y="444" text-anchor="middle" fill="#E4EAF0"
+              font-size="10.5" font-weight="600" font-family="system-ui">Order Executor</text>
+        <text x="550" y="458" text-anchor="middle" fill="#566878"
+              font-size="7.5" font-family="ui-monospace, monospace">limit orders only</text>
+      </g>
+
+      <!-- Execution flow arrows -->
+      <polygon points="328,446 322,442 322,450" fill="#D9565F" opacity="0.45"/>
+      <polygon points="478,446 472,442 472,450" fill="#D9565F" opacity="0.45"/>
+
+      <!-- === EXCHANGE OUTPUT === -->
+      <g class="node">
+        <title>Binance API: Limit order submission and fill monitoring</title>
+        <rect x="310" y="510" width="180" height="40" rx="6"
+              fill="#142540" stroke="#4A90D9" stroke-width="1.5"/>
+        <text x="400" y="535" text-anchor="middle" fill="#E4EAF0"
+              font-size="12" font-weight="600" font-family="system-ui">BINANCE API</text>
+      </g>
+
+      <!-- === SIDE PANEL: MEMORY & LEARNING === -->
+      <text x="810" y="188" fill="#9B7FD4" font-size="8" font-weight="700"
+            letter-spacing="0.14em" font-family="system-ui" opacity="0.6">MEMORY &amp; LEARNING</text>
+
+      <g class="node">
+        <title>ChromaDB RAG Memory: Vector database storing every trade with 16-dim market state embeddings for cosine similarity retrieval</title>
+        <rect x="810" y="198" width="185" height="48" rx="5"
+              fill="#1C1430" stroke="#9B7FD4" stroke-width="1.4"/>
+        <text x="902" y="218" text-anchor="middle" fill="#E4EAF0"
+              font-size="10.5" font-weight="600" font-family="system-ui">ChromaDB RAG</text>
+        <text x="902" y="233" text-anchor="middle" fill="#566878"
+              font-size="7.5" font-family="ui-monospace, monospace">16-dim vectors · cosine sim</text>
+      </g>
+      <g class="node">
+        <title>XGBoost ML Model: Binary classifier trained on 30 features with walk-forward validation and drift detection</title>
+        <rect x="810" y="262" width="185" height="48" rx="5"
+              fill="#1C1430" stroke="#9B7FD4" stroke-width="1.4"/>
+        <text x="902" y="282" text-anchor="middle" fill="#E4EAF0"
+              font-size="10.5" font-weight="600" font-family="system-ui">XGBoost Model</text>
+        <text x="902" y="297" text-anchor="middle" fill="#566878"
+              font-size="7.5" font-family="ui-monospace, monospace">30 features · drift detect</text>
+      </g>
+      <g class="node">
+        <title>Agent Orchestrator: 3 autonomous AI agents (Technical, Sentiment, Research) with accuracy-weighted voting</title>
+        <rect x="810" y="326" width="185" height="48" rx="5"
+              fill="#1C1430" stroke="#9B7FD4" stroke-width="1.4"/>
+        <text x="902" y="346" text-anchor="middle" fill="#E4EAF0"
+              font-size="10.5" font-weight="600" font-family="system-ui">Agent Orchestrator</text>
+        <text x="902" y="361" text-anchor="middle" fill="#566878"
+              font-size="7.5" font-family="ui-monospace, monospace">3 agents · weighted vote</text>
+      </g>
+      <g class="node">
+        <title>Learning Feedback: Trade outcomes feed back into RAG memory, ML training data, and agent accuracy weights</title>
+        <rect x="810" y="390" width="185" height="48" rx="5"
+              fill="#1C1430" stroke="#9B7FD4" stroke-width="1.4"/>
+        <text x="902" y="410" text-anchor="middle" fill="#E4EAF0"
+              font-size="10.5" font-weight="600" font-family="system-ui">Learning Feedback</text>
+        <text x="902" y="425" text-anchor="middle" fill="#566878"
+              font-size="7.5" font-family="ui-monospace, monospace">outcomes &#x2192; retrain loop</text>
+      </g>
+
+      <!-- === CONNECTIONS: Main vertical flow === -->
+
+      <!-- Exchange down to Data distribution bus -->
+      <path d="M400,50 V70" stroke="#2E4458" stroke-width="1.3" fill="none" class="flow-dash"/>
+      <path d="M181,70 H619" stroke="#2E4458" stroke-width="1" fill="none" opacity="0.5"/>
+      <path d="M181,70 V88 M327,70 V88 M473,70 V88 M619,70 V88"
+            stroke="#2E4458" stroke-width="1.3" fill="none" class="flow-dash"/>
+      <!-- Down arrow -->
+      <polygon points="400,68 396,60 404,60" fill="#2E4458" opacity="0.7"/>
+
+      <!-- Data collection bus down to Brain distribution -->
+      <path d="M181,130 V152 M327,130 V152 M473,130 V152 M619,130 V152"
+            stroke="#2E4458" stroke-width="1" fill="none" opacity="0.4"/>
+      <path d="M181,152 H619" stroke="#2E4458" stroke-width="1" fill="none" opacity="0.4"/>
+      <path d="M400,152 V172" stroke="#2E4458" stroke-width="1.3" fill="none" class="flow-dash"/>
+      <path d="M118,172 H683" stroke="#2E4458" stroke-width="1" fill="none" opacity="0.5"/>
+      <path d="M118,172 V195 M231,172 V195 M344,172 V195 M457,172 V195 M570,172 V195 M683,172 V195"
+            stroke="#2E4458" stroke-width="1.3" fill="none" class="flow-dash"/>
+      <polygon points="400,170 396,162 404,162" fill="#2E4458" opacity="0.7"/>
+
+      <!-- Brain collection down to Trade Gate -->
+      <path d="M118,255 V280 M231,255 V280 M344,255 V280 M457,255 V280 M570,255 V280 M683,255 V280"
+            stroke="#2E4458" stroke-width="1" fill="none" opacity="0.4"/>
+      <path d="M118,280 H683" stroke="#2E4458" stroke-width="1" fill="none" opacity="0.4"/>
+      <path d="M400,280 V318" stroke="#2E4458" stroke-width="1.3" fill="none" class="flow-dash"/>
+      <polygon points="400,315 396,307 404,307" fill="#2E4458" opacity="0.7"/>
+
+      <!-- Trade Gate down to Execution -->
+      <path d="M400,366 V398" stroke="#2E4458" stroke-width="1.3" fill="none" class="flow-dash"/>
+      <path d="M250,398 H550" stroke="#2E4458" stroke-width="1" fill="none" opacity="0.5"/>
+      <path d="M250,398 V425 M400,398 V425 M550,398 V425"
+            stroke="#2E4458" stroke-width="1.3" fill="none" class="flow-dash"/>
+      <polygon points="400,396 396,388 404,388" fill="#2E4458" opacity="0.7"/>
+
+      <!-- Execution down to Exchange output -->
+      <path d="M250,467 V490 M400,467 V490 M550,467 V490"
+            stroke="#2E4458" stroke-width="1" fill="none" opacity="0.4"/>
+      <path d="M250,490 H550" stroke="#2E4458" stroke-width="1" fill="none" opacity="0.4"/>
+      <path d="M400,490 V510" stroke="#2E4458" stroke-width="1.3" fill="none" class="flow-dash"/>
+      <polygon points="400,508 396,500 404,500" fill="#2E4458" opacity="0.7"/>
+
+      <!-- === SIDE CONNECTIONS === -->
+      <!-- Brain 3 (Gemini) -> ChromaDB RAG -->
+      <path d="M344,195 V183 H902 V198"
+            stroke="#9B7FD4" stroke-width="1" stroke-dasharray="4 3" fill="none" opacity="0.45"/>
+      <!-- small label on connection -->
+      <text x="620" y="179" text-anchor="middle" fill="#9B7FD4" font-size="6.5"
+            font-family="ui-monospace, monospace" opacity="0.5">RAG context</text>
+
+      <!-- Brain 6 (ML) -> XGBoost Model -->
+      <path d="M733,225 C765,225 790,286 810,286"
+            stroke="#9B7FD4" stroke-width="1" stroke-dasharray="4 3" fill="none" opacity="0.45"/>
+      <text x="770" y="248" text-anchor="middle" fill="#9B7FD4" font-size="6.5"
+            font-family="ui-monospace, monospace" opacity="0.5" transform="rotate(-30,770,248)">predictions</text>
+
+      <!-- Agent Orchestrator -> Trade Gate area -->
+      <path d="M810,350 H520"
+            stroke="#9B7FD4" stroke-width="1" stroke-dasharray="4 3" fill="none" opacity="0.4"/>
+      <text x="670" y="345" text-anchor="middle" fill="#9B7FD4" font-size="6.5"
+            font-family="ui-monospace, monospace" opacity="0.5">agent votes</text>
+
+      <!-- Execution -> Feedback -->
+      <path d="M615,446 C710,446 780,414 810,414"
+            stroke="#9B7FD4" stroke-width="1" stroke-dasharray="4 3" fill="none" opacity="0.4"/>
+      <text x="712" y="438" text-anchor="middle" fill="#9B7FD4" font-size="6.5"
+            font-family="ui-monospace, monospace" opacity="0.5">trade outcomes</text>
+
+      <!-- Feedback loop arrow (right edge, going up) -->
+      <path d="M995,432 V205" stroke="#9B7FD4" stroke-width="1" stroke-dasharray="3 4" fill="none" opacity="0.3"/>
+      <polygon points="995,207 991,215 999,215" fill="#9B7FD4" opacity="0.35"/>
+      <text transform="rotate(-90,1010,318)" x="1010" y="318" text-anchor="middle"
+            fill="#9B7FD4" font-size="6.5" font-family="ui-monospace, monospace" opacity="0.35">LEARNING LOOP</text>
+
+    </svg>
+  </div>
+
+  <div class="prot-bar">
+    <span class="prot-label">5-LAYER PROTECTION</span>
+    <span class="prot-item">L1 Per-Trade SL/TP</span>
+    <span class="prot-item">L2 Session Pause</span>
+    <span class="prot-item">L3 Portfolio Limits</span>
+    <span class="prot-item">L4 Black Swan Exit</span>
+    <span class="prot-item">L5 Auto-Recovery</span>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><span class="stat-val">16,800+</span><span class="stat-lbl">Lines of Python</span></div>
+    <div class="stat"><span class="stat-val">51</span><span class="stat-lbl">Source Modules</span></div>
+    <div class="stat"><span class="stat-val">12</span><span class="stat-lbl">Trading Pairs</span></div>
+    <div class="stat"><span class="stat-val">6</span><span class="stat-lbl">AI/ML Techniques</span></div>
+    <div class="stat"><span class="stat-val">30s</span><span class="stat-lbl">Cycle Interval</span></div>
+    <div class="stat"><span class="stat-val">24/7</span><span class="stat-lbl">Oracle Cloud</span></div>
+  </div>
+
+  <div class="legend">
+    <div class="legend-item"><span class="legend-dot" style="background:#4A90D9"></span>Exchange</div>
+    <div class="legend-item"><span class="legend-dot" style="background:#6366F1"></span>Data Ingestion</div>
+    <div class="legend-item"><span class="legend-dot" style="background:#D4982F"></span>Multi-Brain Analysis</div>
+    <div class="legend-item"><span class="legend-dot" style="background:#2FBF8A"></span>Consensus Decision</div>
+    <div class="legend-item"><span class="legend-dot" style="background:#D9565F"></span>Order Execution</div>
+    <div class="legend-item"><span class="legend-dot" style="background:#9B7FD4"></span>Memory &amp; Learning</div>
+  </div>
+
+  <p class="footer">Multi-Agent AI Trading System &middot; github.com/Leo-emp/AI-trading-bot-</p>
+</div>

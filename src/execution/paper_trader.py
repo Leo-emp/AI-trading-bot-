@@ -8,8 +8,13 @@
 # - Virtual USDT balance
 # - Open positions with entry price, SL, TP
 # - Trade history with accurate P&L after fees
+#
+# STATE PERSISTENCE: saves balance + positions to JSON after every
+# trade open/close. Survives restarts, watchdog crashes, weekly reboots.
 
+import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from dataclasses import dataclass
@@ -19,6 +24,9 @@ from src.strategies.base import StrategySignal
 from src.storage.models import Trade
 
 logger = logging.getLogger(__name__)
+
+# State file location — next to the database in data/
+STATE_FILE = os.path.join(os.path.dirname(__file__), "..", "..", "data", "paper_state.json")
 
 
 @dataclass
@@ -50,20 +58,28 @@ class PaperTrader:
                  max_positions: int = 3,
                  max_per_pair: int = 2,
                  time_exit_hours: float = 4.0):
+        self._initial_balance = initial_balance
         self._balance = initial_balance
         self._fee_rate = maker_fee_rate
         self._min_order = min_order_size
         self._max_positions = max_positions
-        # Cap per-pair concentration — allows scaling in (2 entries)
-        # but prevents going all-in on one asset with a $100 account
         self._max_per_pair = max_per_pair
-        self._time_exit = time_exit_hours * 3600  # convert to seconds
+        self._time_exit = time_exit_hours * 3600
         self._positions: list[OpenPosition] = []
         self._trade_history: list[Trade] = []
+        self._total_trades = 0
+        self._total_wins = 0
+
+        # Try to restore saved state from disk
+        self._load_state()
 
     def get_balance(self) -> float:
         """Current USDT balance."""
         return self._balance
+
+    def get_initial_balance(self) -> float:
+        """Balance at the start of paper trading (doesn't change on restart)."""
+        return self._initial_balance
 
     def get_open_positions(self) -> list[OpenPosition]:
         """All currently open positions."""
@@ -100,8 +116,8 @@ class PaperTrader:
 
         # --- Calculate entry ---
         entry_price = signal.entry_price
-        quantity = position_size / entry_price  # how much asset we're buying
-        entry_fee = position_size * self._fee_rate  # fee on entry side
+        quantity = position_size / entry_price
+        entry_fee = position_size * self._fee_rate
 
         # Deduct position size + entry fee from balance
         self._balance -= (position_size + entry_fee)
@@ -126,6 +142,9 @@ class PaperTrader:
             signal.stop_loss, signal.take_profit, entry_fee,
         )
 
+        # Persist state after opening
+        self._save_state()
+
         # Return an "open" trade record
         return Trade(
             timestamp=datetime.now(timezone.utc),
@@ -142,11 +161,6 @@ class PaperTrader:
         """Check all open positions against current prices.
 
         Closes positions that hit stop-loss, take-profit, or time limit.
-        When highs/lows are provided (backtest mode), uses the candle's
-        high and low to check SL/TP — a candle's low might hit SL even
-        if the close price is above it.
-
-        Returns list of closed Trade records.
         """
         closed_trades = []
         still_open = []
@@ -159,16 +173,13 @@ class PaperTrader:
                 still_open.append(pos)
                 continue
 
-            # Use candle extremes when available (backtest), else just close
             candle_low = lows.get(pos.pair, price)
             candle_high = highs.get(pos.pair, price)
 
             close_reason = None
             exit_price = price
 
-            # --- Check stop-loss using candle low/high ---
-            # SL is checked FIRST (if both SL and TP hit in same candle,
-            # assume worst case: SL hit first)
+            # SL checked first (worst case if both hit same candle)
             if pos.side == "buy" and candle_low <= pos.stop_loss:
                 close_reason = "stop_loss"
                 exit_price = pos.stop_loss
@@ -176,8 +187,6 @@ class PaperTrader:
                 close_reason = "stop_loss"
                 exit_price = pos.stop_loss
 
-            # --- Check take-profit using candle high/low ---
-            # Only check TP if SL wasn't already hit
             if close_reason is None:
                 if pos.side == "buy" and candle_high >= pos.take_profit:
                     close_reason = "take_profit"
@@ -186,7 +195,7 @@ class PaperTrader:
                     close_reason = "take_profit"
                     exit_price = pos.take_profit
 
-            # --- Check time exit (4 hours) ---
+            # Time exit (configurable, default 4 hours)
             if close_reason is None and time.time() - pos.opened_at > self._time_exit:
                 close_reason = "time_exit"
 
@@ -197,18 +206,22 @@ class PaperTrader:
                 still_open.append(pos)
 
         self._positions = still_open
+
+        # Persist after any closes
+        if closed_trades:
+            self._save_state()
+
         return closed_trades
 
     def force_close_all(self, current_prices: dict) -> list[Trade]:
-        """Force-close all open positions at current market price.
-        Used at end of backtest to return all capital to balance.
-        """
+        """Force-close all open positions at current market price."""
         closed = []
         for pos in self._positions:
             price = current_prices.get(pos.pair, pos.entry_price)
             trade = self._close_position(pos, price, "force_close")
             closed.append(trade)
         self._positions = []
+        self._save_state()
         return closed
 
     def _close_position(self, pos: OpenPosition, exit_price: float,
@@ -218,12 +231,9 @@ class PaperTrader:
         exit_fee = exit_notional * self._fee_rate
         total_fees = pos.entry_fee + exit_fee
 
-        # Calculate P&L
         if pos.side == "buy":
-            # Bought low, selling high = profit
             gross_pnl = (exit_price - pos.entry_price) * pos.quantity
         else:
-            # Sold high, buying back low = profit
             gross_pnl = (pos.entry_price - exit_price) * pos.quantity
 
         net_pnl = gross_pnl - total_fees
@@ -232,10 +242,15 @@ class PaperTrader:
         entry_notional = pos.quantity * pos.entry_price
         self._balance += entry_notional + gross_pnl - exit_fee
 
+        # Track stats
+        self._total_trades += 1
+        if net_pnl > 0:
+            self._total_wins += 1
+
         logger.info(
-            "PAPER CLOSE %s %s @ $%.2f -> $%.2f | P&L: $%.4f (fees: $%.4f) [%s]",
+            "PAPER CLOSE %s %s @ $%.2f -> $%.2f | P&L: $%.4f (fees: $%.4f) [%s] | Balance: $%.2f",
             pos.side.upper(), pos.pair, pos.entry_price, exit_price,
-            net_pnl, total_fees, reason,
+            net_pnl, total_fees, reason, self._balance,
         )
 
         return Trade(
@@ -248,3 +263,64 @@ class PaperTrader:
             pnl=net_pnl, fees=total_fees,
             status="closed",
         )
+
+    def _save_state(self):
+        """Persist balance + positions to disk. Survives restarts."""
+        try:
+            state = {
+                "balance": self._balance,
+                "initial_balance": self._initial_balance,
+                "total_trades": self._total_trades,
+                "total_wins": self._total_wins,
+                "saved_at": time.time(),
+                "positions": [
+                    {
+                        "pair": p.pair, "side": p.side,
+                        "entry_price": p.entry_price, "quantity": p.quantity,
+                        "stop_loss": p.stop_loss, "take_profit": p.take_profit,
+                        "strategy": p.strategy, "opened_at": p.opened_at,
+                        "entry_fee": p.entry_fee,
+                    }
+                    for p in self._positions
+                ],
+            }
+            os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+            with open(STATE_FILE, "w") as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            logger.error("Failed to save paper trader state: %s", e)
+
+    def _load_state(self):
+        """Restore balance + positions from disk if available."""
+        try:
+            if not os.path.exists(STATE_FILE):
+                logger.info("No saved state, starting fresh at $%.2f", self._balance)
+                return
+
+            with open(STATE_FILE, "r") as f:
+                state = json.load(f)
+
+            self._balance = state["balance"]
+            self._initial_balance = state.get("initial_balance", self._initial_balance)
+            self._total_trades = state.get("total_trades", 0)
+            self._total_wins = state.get("total_wins", 0)
+
+            for p in state.get("positions", []):
+                pos = OpenPosition(
+                    pair=p["pair"], side=p["side"],
+                    entry_price=p["entry_price"], quantity=p["quantity"],
+                    stop_loss=p["stop_loss"], take_profit=p["take_profit"],
+                    strategy=p["strategy"], opened_at=p["opened_at"],
+                    entry_fee=p["entry_fee"],
+                )
+                self._positions.append(pos)
+
+            age_sec = time.time() - state.get("saved_at", time.time())
+            logger.info(
+                "Restored paper state: $%.2f balance, %d open positions, "
+                "%d total trades (%d wins), saved %.0fs ago",
+                self._balance, len(self._positions),
+                self._total_trades, self._total_wins, age_sec,
+            )
+        except Exception as e:
+            logger.error("Failed to load paper state: %s (starting fresh)", e)

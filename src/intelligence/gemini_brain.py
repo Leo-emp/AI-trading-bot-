@@ -4,9 +4,9 @@
 # Sends market data to Google's Gemini API and asks for analysis.
 # This is Brain 3 of the 5-brain consensus system.
 #
-# Per-pair caching: each pair gets its own cached result with a 3-minute
-# cooldown. Gemini 2.5 Flash free tier allows 10 RPM — with 12 pairs
-# on a 3-minute per-pair cooldown, we average ~4 RPM (safe headroom).
+# Per-pair caching: each pair gets its own cached result with a 1-hour
+# cooldown. Free tier: 20 calls/day. 12 pairs × 1st cycle = 12 calls,
+# leaving 6 for the 2nd batch. Daily counter stops at 18 (saves 2 buffer).
 #
 # SECURITY: API key loaded from environment variable only.
 
@@ -26,9 +26,14 @@ class GeminiBrain:
     Per-pair caching prevents stale cross-pair analysis contamination.
     """
 
-    def __init__(self, min_interval_seconds: int = 600):
-        # Minimum time between API calls PER PAIR (10 min default)
+    def __init__(self, min_interval_seconds: int = 3600):
+        # Minimum time between API calls PER PAIR (1 hour default)
+        # Free tier: 20 calls/day. With 12 pairs, first cycle uses 12.
+        # 1-hour cache means second batch (8 remaining) fires at +1h.
         self._min_interval = min_interval_seconds
+        self._daily_calls = 0
+        self._daily_limit = 18  # save 2 of 20 as buffer
+        self._rate_limited_until = 0  # global cooldown after 429 error
         # Per-pair cache: {"BTC/USDT": {"time": ..., "result": ...}}
         self._cache: dict[str, dict] = {}
         self._model = None
@@ -73,6 +78,16 @@ class GeminiBrain:
         if cached and (now - cached["time"] < self._min_interval):
             return cached["result"]
 
+        # Daily call limit — save quota for when it matters
+        if self._daily_calls >= self._daily_limit:
+            return {"direction": "HOLD", "confidence": 0.0,
+                    "reasoning": "daily quota reserved"}
+
+        # Global cooldown after 429 rate limit — stop hammering the API
+        if now < self._rate_limited_until:
+            return {"direction": "HOLD", "confidence": 0.0,
+                    "reasoning": "rate limited cooldown"}
+
         if not self._init_model():
             return {"direction": "HOLD", "confidence": 0.0,
                     "reasoning": "Gemini not available"}
@@ -83,15 +98,23 @@ class GeminiBrain:
             response = await self._call_gemini(prompt)
             result = self._parse_response(response)
 
-            # Cache per pair
+            # Cache per pair + count toward daily limit
             self._cache[pair] = {"time": now, "result": result}
-            logger.info("Gemini analysis for %s: %s (%.2f confidence) — %s",
+            self._daily_calls += 1
+            logger.info("Gemini [%d/%d] %s: %s (%.2f confidence) — %s",
+                       self._daily_calls, self._daily_limit,
                        pair, result["direction"], result["confidence"],
                        result["reasoning"][:80])
             return result
 
         except Exception as e:
-            logger.error("Gemini analysis failed for %s: %s", pair, e)
+            err_str = str(e)
+            if "429" in err_str or "quota" in err_str.lower():
+                # Rate limited — back off for 1 hour (quota is daily)
+                self._rate_limited_until = now + 3600
+                logger.warning("Gemini rate limited, pausing for 1 hour")
+            else:
+                logger.error("Gemini analysis failed for %s: %s", pair, e)
             return {"direction": "HOLD", "confidence": 0.0,
                     "reasoning": f"analysis failed: {e}"}
 

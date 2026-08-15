@@ -174,6 +174,7 @@ class TradingEngine:
             maker_fee_rate=self._settings["fees"]["maker_rate"],
             min_order_size=10.0,
             max_positions=tier.get("max_positions", 3),
+            time_exit_hours=self._settings.get("risk", {}).get("time_exit_hours", 1),
         )
 
         # Phase 5: Initialize RAG memory (starts collecting from day 1)
@@ -188,11 +189,25 @@ class TradingEngine:
         # Register event handlers
         self._register_events()
 
+        # Re-register restored positions with smart exit and trailing stop
+        for pos in self._trader.get_open_positions():
+            pos_id = f"{pos.pair}_{pos.entry_price}"
+            self._smart_exit.register(
+                pos_id, pos.pair, pos.side,
+                pos.entry_price, pos.stop_loss, pos.take_profit,
+            )
+            self._trailing_stops.register(
+                pos_id, pos.pair, pos.side,
+                pos.entry_price, pos.stop_loss,
+            )
+
         self._running = True
         logger.info(
             "TradingEngine started. Balance: $%.2f | Mode: %s | "
-            "Strategies: %s | Brains: 5",
-            balance, self._mode, list(self._strategies.keys()),
+            "Strategies: %s | Brains: 5 | Restored positions: %d",
+            self._trader.get_balance(), self._mode,
+            list(self._strategies.keys()),
+            len(self._trader.get_open_positions()),
         )
 
     def _register_events(self):
@@ -264,7 +279,7 @@ class TradingEngine:
                 balance = self._trader.get_balance()
                 protection_status = self._protection.check(
                     current_balance=balance,
-                    initial_balance=self._trader._balance,
+                    initial_balance=self._trader.get_initial_balance(),
                 )
 
                 if protection_status.action == "SHUTDOWN":
@@ -347,7 +362,12 @@ class TradingEngine:
             # Smart exit replaces fixed TP — lets winners run further
             current_prices = {pair: current_price}
 
+            # Only check positions for THIS pair — passing BTC's price
+            # to ETH's smart exit would corrupt the SL to BTC-range values
             for pos in self._trader.get_open_positions():
+                if pos.pair != pair:
+                    continue
+
                 pos_id = f"{pos.pair}_{pos.entry_price}"
 
                 # Update smart exit (4-phase: normal → breakeven → trail → tight)
@@ -362,11 +382,10 @@ class TradingEngine:
                     if new_stop and new_stop > pos.stop_loss:
                         pos.stop_loss = new_stop
 
-                    # Remove fixed take profit — let trailing stop handle exit
-                    # Only keep TP as a safety cap at 3x original distance
+                    # Once trailing is active, widen TP so trailing stop handles exit
+                    # Use ORIGINAL TP from smart exit state to avoid compounding
                     if exit_state.phase >= 3:
-                        # In trailing mode, remove TP cap so winners run
-                        original_tp_dist = abs(pos.take_profit - pos.entry_price)
+                        original_tp_dist = abs(exit_state.original_tp - exit_state.entry_price)
                         extended_tp = (pos.entry_price + original_tp_dist * 3
                                       if pos.side == "buy"
                                       else pos.entry_price - original_tp_dist * 3)

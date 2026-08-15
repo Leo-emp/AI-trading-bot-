@@ -21,8 +21,8 @@ logger = logging.getLogger(__name__)
 
 # Confidence threshold above which an opposing signal vetoes the trade
 VETO_THRESHOLD = 0.65
-# Minimum brains that must agree — stricter = fewer but higher quality trades
-MIN_CONSENSUS = 4
+# Minimum brains that must agree — 3/5 = majority vote
+MIN_CONSENSUS = 3
 
 
 @dataclass(frozen=True)

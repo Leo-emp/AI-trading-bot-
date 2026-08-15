@@ -8,35 +8,143 @@ Deployed 24/7 on Oracle Cloud, trading 12 pairs on Binance with 5-layer autonomo
 
 ## Architecture
 
-```
-                              ┌──────────────────────────┐
-                              │     TRADE GATE           │
-                              │  (4/5 consensus + veto)  │
-                              └────────────┬─────────────┘
-               ┌──────────┬───────┬────────┼────────┬────────────┐
-               ▼          ▼       ▼        ▼        ▼            ▼
-          ┌─────────┐ ┌───────┐ ┌──────┐ ┌──────┐ ┌───────┐ ┌───────┐
-          │Strategy │ │Order  │ │Gemini│ │Multi-│ │Cross- │ │  ML   │
-          │Signal   │ │Book   │ │AI +  │ │Time- │ │Asset  │ │Signal │
-          │(4 strats)│ │Flow  │ │RAG   │ │frame │ │Corr.  │ │(XGB)  │
-          └─────────┘ └───────┘ └──────┘ └──────┘ └───────┘ └───────┘
-           Brain 1    Brain 2   Brain 3  Brain 4   Brain 5   Brain 6
-                                   │
-                              ┌────┴────┐
-                              │ChromaDB │
-                              │(vector  │
-                              │ memory) │
-                              └─────────┘
+```mermaid
+graph TB
+    subgraph Clients["DATA INPUTS"]
+        BN[Binance API<br/>12 pairs × 3 timeframes]
+        OB[Order Book<br/>Depth + whale detection]
+    end
 
-    ┌─────────────────────────────────────────────────────────────┐
-    │               5-LAYER PROTECTION SYSTEM                     │
-    │  L1: Per-trade (SL/TP/trailing/time-exit)                  │
-    │  L2: Session (consecutive loss pause, drawdown defense)     │
-    │  L3: Portfolio (weekly/monthly drawdown limits)              │
-    │  L4: Black swan (flash crash instant exit)                  │
-    │  L5: Infrastructure (auto-reconnect, self-healing)          │
-    └─────────────────────────────────────────────────────────────┘
+    subgraph Brains["5-BRAIN CONSENSUS (4/5 required)"]
+        B1[Technical Signals<br/>RSI, MACD, BB, ATR]
+        B2[Order Flow<br/>Imbalance + whales]
+        B3[AI Sentiment<br/>Gemini LLM + RAG]
+        B4[Multi-Timeframe<br/>5m, 15m, 1h alignment]
+        B5[Cross-Asset<br/>Correlation tracking]
+    end
+
+    subgraph AI["AI / ML LAYER"]
+        RAG[ChromaDB RAG<br/>16-dim embeddings<br/>cosine similarity]
+        ML[XGBoost Classifier<br/>30-feature vector<br/>walk-forward validation]
+        AG[3 Agentic Brains<br/>Technical + Sentiment<br/>+ Research agents]
+    end
+
+    subgraph Risk["5-LAYER PROTECTION"]
+        L1[L1: Per-Trade<br/>SL / TP / trailing / time-exit]
+        L2[L2: Session<br/>3-loss reduce, 5-loss pause]
+        L3[L3: Portfolio<br/>Weekly/monthly drawdown]
+        L4[L4: Black Swan<br/>Flash crash instant exit]
+        L5[L5: Infrastructure<br/>Auto-reconnect, self-heal]
+    end
+
+    subgraph Exec["EXECUTION"]
+        PS[Position Sizer<br/>Quarter-Kelly criterion]
+        LO[Limit Orders Only<br/>Maker fees 0.075%]
+    end
+
+    subgraph Storage["STORAGE"]
+        DB[(SQLite<br/>WAL mode)]
+        VDB[(ChromaDB<br/>Vector memory)]
+    end
+
+    BN --> B1 & B4
+    OB --> B2
+    B3 --> RAG
+    RAG --> VDB
+    ML --> B1
+    AG --> B3
+
+    B1 & B2 & B3 & B4 & B5 --> TG{Trade Gate<br/>4/5 consensus + veto}
+    TG --> Risk
+    Risk --> PS --> LO
+    LO --> DB
+
+    style Brains fill:#1a1a2e,stroke:#F59E0B,color:#fff
+    style AI fill:#1a1a2e,stroke:#A78BFA,color:#fff
+    style Risk fill:#1a1a2e,stroke:#EF4444,color:#fff
+    style Exec fill:#1a1a2e,stroke:#10B981,color:#fff
 ```
+
+## Problem Statement
+
+Cryptocurrency markets operate 24/7 with extreme volatility, making manual trading impractical for retail investors. Existing automated solutions suffer from three core limitations:
+
+1. **Single-signal dependency** — most bots use one indicator (e.g., RSI crossover) which fails when market conditions change
+2. **No memory** — bots analyze each moment in isolation, unable to learn from their own trading history
+3. **Brittle risk management** — a single stop-loss layer cannot protect against cascading failures (flash crashes, API outages, liquidity crises)
+
+This project addresses all three by combining multiple AI/ML techniques into a unified decision pipeline with autonomous protection.
+
+---
+
+## Technical Deep Dive
+
+### Multi-Brain Consensus Architecture
+
+Rather than relying on a single signal source, the system implements a **5-brain voting mechanism** inspired by ensemble methods in machine learning. Each brain analyzes market conditions independently:
+
+| Brain | Input | Method | Output |
+|-------|-------|--------|--------|
+| Technical Signals | OHLCV + indicators | Rule-based (RSI, MACD, BB) | BUY/SELL/HOLD + confidence |
+| Order Flow | Order book depth | Statistical (imbalance ratio) | Direction + whale detection |
+| AI Sentiment | Price + indicators + history | Gemini LLM + RAG context | Direction + reasoning |
+| Multi-Timeframe | 5m, 15m, 1h candles | Cross-timeframe alignment | Agree/disagree signal |
+| Cross-Asset | BTC, ETH, altcoin prices | Correlation tracking | Systemic risk signal |
+
+A trade executes only when **4 of 5 brains agree** on direction, AND no brain shows a strong opposing signal (confidence > 0.65). This eliminates low-conviction trades and dramatically improves win rate at the cost of trade frequency.
+
+### Retrieval-Augmented Generation (RAG)
+
+The system maintains a **vector database** (ChromaDB) of every completed trade alongside its full market context. When analyzing a new trading opportunity:
+
+1. The current market state is encoded as a **16-dimensional embedding vector** using handcrafted features (RSI, MACD, volume, regime, price momentum, order book imbalance)
+2. ChromaDB performs **cosine similarity search** to find the 5 most similar historical scenarios
+3. These historical outcomes are injected into the Gemini LLM prompt as context
+4. Gemini analyzes current conditions informed by "what happened last time conditions looked like this"
+
+This transforms the LLM from a stateless analyzer into one with **experiential memory** — the system literally learns from its own trading history without requiring model retraining.
+
+**Embedding design choice:** We use handcrafted numerical feature vectors rather than transformer-based text embeddings. For structured financial data, domain-specific features (RSI normalized to [-1,1], log-scaled volume ratios, cyclical time encoding) outperform general-purpose text embeddings while running on minimal hardware (1 GB RAM server).
+
+### Machine Learning Pipeline
+
+An XGBoost binary classifier predicts whether a trade signal will be profitable, using a **30-dimensional feature vector**:
+
+- **Price features (7):** Multi-window returns, momentum at 5/10/20 periods, price vs EMA distance
+- **Volume features (4):** Volume ratio, trend, spike detection, consistency
+- **Indicator features (8):** RSI + slope, MACD + crossover, Bollinger position + width, ATR%, ADX
+- **Order book features (3):** Imbalance, spread, whale pressure
+- **Regime features (3):** Encoded regime, confidence, stability
+- **RAG features (3):** Historical win rate, average P&L, similarity score from similar scenarios
+- **Time features (2):** Cyclical hour encoding (sin/cos to preserve circular nature)
+
+Training uses **walk-forward validation**: train on the oldest 80% of data, validate on the newest 20%. This prevents look-ahead bias that plagues most backtesting. The model only deploys if validation accuracy exceeds 55%.
+
+**Drift detection:** After deployment, the system tracks live prediction accuracy. If it drops more than 5% below the training baseline, the model auto-reverts to rule-based signals and flags for retraining.
+
+### Agentic AI Layer
+
+Three specialized AI agents reason autonomously about market conditions:
+
+1. **Technical Agent** — analyzes chart patterns and indicator setups
+2. **Sentiment Agent** — evaluates market regime, funding rates, fear/greed index
+3. **Research Agent** — cross-references assets, queries RAG memory for historical patterns
+
+Each agent has access to domain-specific **tools** (API queries, calculations, database lookups), produces a **chain-of-thought reasoning** trace, votes independently with a confidence score, and is **weighted by historical accuracy** — agents that have been more correct get more voting power.
+
+### 5-Layer Autonomous Protection
+
+| Layer | Scope | Response Time | Action |
+|-------|-------|---------------|--------|
+| L1: Per-Trade | Single position | Milliseconds | Hard stop-loss, trailing stop, time-based exit |
+| L2: Session | Trading session | Minutes | Reduce size after 3 losses, pause after 5 |
+| L3: Portfolio | Weekly/monthly | Hours | Scale down on drawdown, switch to defense mode |
+| L4: Black Swan | Market-wide | Instant | Exit all positions on >5% move in 1 minute |
+| L5: Infrastructure | System | Automatic | Auto-reconnect, crash recovery, graceful degradation |
+
+Each layer operates independently — a failure in one does not compromise others. The system degrades gracefully: if Gemini API is down, it continues with technical signals only. If WebSocket disconnects, it falls back to REST polling. If the process crashes, systemd auto-restarts within 30 seconds.
+
+---
 
 ## AI/ML Techniques Used
 
@@ -85,6 +193,21 @@ Tested across 5 market conditions (normal, bull, bear, volatile, sideways):
 | Trend Pullback | $4.54 | 56.6% | 1.0% | 5/5 |
 
 **Overall: 19/20 strategy-seed combinations pass** ($100 starting balance, fees included)
+
+### System Specifications
+
+| Metric | Value |
+|--------|-------|
+| Total codebase | 16,800+ lines of Python |
+| Source files | 51 Python modules |
+| Test files | 18 |
+| Trading pairs | 12 (BTC, ETH, SOL, XRP, DOGE, BNB, ADA, AVAX, POL, LINK, DOT, NEAR) |
+| Cycle interval | 30 seconds |
+| Timeframes analyzed | 5m, 15m, 1h |
+| Feature vector dimensions | 30 (ML) + 16 (embedding) |
+| Deployment | Oracle Cloud Free Tier (Ubuntu 22.04, systemd) |
+
+---
 
 ## Tech Stack
 
@@ -157,20 +280,6 @@ ai-trading-bot/                    # 16,800+ lines of Python
 └── main.py                        # Entry point
 ```
 
-## Evolution Roadmap
-
-| Phase | Status | What |
-|-------|--------|------|
-| 0 | Done | Backtesting framework, historical data, walk-forward validation |
-| 1 | Done | Foundation, indicators, risk manager, smart scalp strategy |
-| 2 | Done | Grid strategy, Gemini AI brain, strategy selector |
-| 3 | **Active** | Paper trading 24/7 on Oracle Cloud, collecting data |
-| 4 | Code ready | XGBoost ML model — activates after 200+ trades |
-| 5 | **Active** | RAG memory — storing every trade in ChromaDB from day 1 |
-| 6 | Code ready | Agentic AI — 3 autonomous brain agents with tool use |
-| 7 | Planned | Fine-tuned model — distill Gemini into custom Gemma 2B |
-| 8 | Code ready | Solana DEX arbitrage — Jupiter/Raydium/Orca scanner |
-
 ## Key Engineering Decisions
 
 **Why limit orders only?** Market orders pay taker fees (0.1%), limit orders pay maker fees (0.075%). On 20 trades/day, that's $0.50/day saved — 15% of daily target profit.
@@ -183,6 +292,12 @@ ai-trading-bot/                    # 16,800+ lines of Python
 
 **Why 5 protection layers?** Each layer catches what the others miss. Per-trade stops catch single bad trades. Session protection catches losing streaks. Portfolio protection catches regime shifts. Black swan protection catches flash crashes. Infrastructure protection catches technical failures.
 
+## Future Work
+
+- **Phase 7:** Distill Gemini's reasoning chains into a smaller fine-tuned model (Gemma 2B) for faster, cheaper inference
+- **Phase 8:** Solana DEX cross-pool arbitrage scanner (Jupiter, Raydium, Orca)
+- **Performance dashboard:** Real-time web interface showing live P&L, trade history, and agent reasoning chains
+
 ## Security
 
 - API keys stored in `.env` only (never in code, config, or commits)
@@ -194,24 +309,18 @@ ai-trading-bot/                    # 16,800+ lines of Python
 ## Setup
 
 ```bash
-# Clone
 git clone https://github.com/Leo-emp/AI-trading-bot-.git
 cd AI-trading-bot-
 
-# Install
 python -m venv venv
 source venv/bin/activate  # or venv\Scripts\activate on Windows
 pip install -r requirements.txt
 
-# Configure
 cp .env.example .env
 # Edit .env with your Binance API keys and Gemini API key
 
-# Backtest first
-python -m backtest.engine
-
-# Paper trade
-python main.py --slow
+python -m backtest.engine   # Backtest first
+python main.py --slow       # Paper trade
 ```
 
 ## License

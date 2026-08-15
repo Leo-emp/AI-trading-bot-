@@ -9,60 +9,36 @@ Deployed 24/7 on Oracle Cloud, trading 12 pairs on Binance with 5-layer autonomo
 ## Architecture
 
 ```mermaid
-graph TB
-    subgraph Clients["DATA INPUTS"]
-        BN[Binance API<br/>12 pairs × 3 timeframes]
-        OB[Order Book<br/>Depth + whale detection]
-    end
+graph TD
+    BN[Binance API - 12 pairs x 3 timeframes] --> B1[Brain 1: Technical Signals]
+    BN --> B4[Brain 4: Multi-Timeframe]
+    OB[Order Book Depth] --> B2[Brain 2: Order Flow]
+    RAG[ChromaDB RAG - 16-dim embeddings] --> B3[Brain 3: AI Sentiment - Gemini + RAG]
+    ML[XGBoost - 30 features] --> B1
+    AG[3 Agentic Brains] --> B3
+    B5[Brain 5: Cross-Asset Correlation]
 
-    subgraph Brains["5-BRAIN CONSENSUS (4/5 required)"]
-        B1[Technical Signals<br/>RSI, MACD, BB, ATR]
-        B2[Order Flow<br/>Imbalance + whales]
-        B3[AI Sentiment<br/>Gemini LLM + RAG]
-        B4[Multi-Timeframe<br/>5m, 15m, 1h alignment]
-        B5[Cross-Asset<br/>Correlation tracking]
-    end
+    B1 --> TG{Trade Gate - 4/5 consensus}
+    B2 --> TG
+    B3 --> TG
+    B4 --> TG
+    B5 --> TG
 
-    subgraph AI["AI / ML LAYER"]
-        RAG[ChromaDB RAG<br/>16-dim embeddings<br/>cosine similarity]
-        ML[XGBoost Classifier<br/>30-feature vector<br/>walk-forward validation]
-        AG[3 Agentic Brains<br/>Technical + Sentiment<br/>+ Research agents]
-    end
+    TG --> L1[L1: Per-Trade SL/TP/trailing]
+    TG --> L2[L2: Session - loss pause]
+    TG --> L3[L3: Portfolio drawdown]
+    TG --> L4[L4: Black Swan exit]
+    TG --> L5[L5: Infrastructure self-heal]
 
-    subgraph Risk["5-LAYER PROTECTION"]
-        L1[L1: Per-Trade<br/>SL / TP / trailing / time-exit]
-        L2[L2: Session<br/>3-loss reduce, 5-loss pause]
-        L3[L3: Portfolio<br/>Weekly/monthly drawdown]
-        L4[L4: Black Swan<br/>Flash crash instant exit]
-        L5[L5: Infrastructure<br/>Auto-reconnect, self-heal]
-    end
+    L1 --> PS[Position Sizer - Quarter-Kelly]
+    L2 --> PS
+    L3 --> PS
+    L4 --> PS
+    L5 --> PS
 
-    subgraph Exec["EXECUTION"]
-        PS[Position Sizer<br/>Quarter-Kelly criterion]
-        LO[Limit Orders Only<br/>Maker fees 0.075%]
-    end
-
-    subgraph Storage["STORAGE"]
-        DB[(SQLite<br/>WAL mode)]
-        VDB[(ChromaDB<br/>Vector memory)]
-    end
-
-    BN --> B1 & B4
-    OB --> B2
-    B3 --> RAG
-    RAG --> VDB
-    ML --> B1
-    AG --> B3
-
-    B1 & B2 & B3 & B4 & B5 --> TG{Trade Gate<br/>4/5 consensus + veto}
-    TG --> Risk
-    Risk --> PS --> LO
-    LO --> DB
-
-    style Brains fill:#1a1a2e,stroke:#F59E0B,color:#fff
-    style AI fill:#1a1a2e,stroke:#A78BFA,color:#fff
-    style Risk fill:#1a1a2e,stroke:#EF4444,color:#fff
-    style Exec fill:#1a1a2e,stroke:#10B981,color:#fff
+    PS --> LO[Limit Orders Only - 0.075% maker]
+    LO --> DB[(SQLite WAL)]
+    B3 --> VDB[(ChromaDB Vectors)]
 ```
 
 ## Problem Statement

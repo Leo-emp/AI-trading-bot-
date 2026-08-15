@@ -4,16 +4,9 @@
 # Sends market data to Google's Gemini API and asks for analysis.
 # This is Brain 3 of the 5-brain consensus system.
 #
-# What it analyzes:
-# - Current price action and indicators
-# - Market regime context
-# - Recent price history pattern
-# - Volume analysis
-#
-# Returns: BUY, SELL, or HOLD with confidence and reasoning.
-#
-# Rate limited: calls Gemini at most once every 15 minutes
-# to stay within free tier (15 RPM on gemini-2.0-flash).
+# Per-pair caching: each pair gets its own cached result with a 3-minute
+# cooldown. Gemini 2.5 Flash free tier allows 10 RPM — with 12 pairs
+# on a 3-minute per-pair cooldown, we average ~4 RPM (safe headroom).
 #
 # SECURITY: API key loaded from environment variable only.
 
@@ -30,14 +23,14 @@ class GeminiBrain:
     """AI-powered market analysis using Google Gemini.
 
     Provides the "AI brain" signal for the 5-brain consensus.
-    Lazy-loads the Gemini SDK on first use.
+    Per-pair caching prevents stale cross-pair analysis contamination.
     """
 
-    def __init__(self, min_interval_seconds: int = 900):
-        # Minimum time between API calls (15 min default)
+    def __init__(self, min_interval_seconds: int = 600):
+        # Minimum time between API calls PER PAIR (10 min default)
         self._min_interval = min_interval_seconds
-        self._last_call_time = 0
-        self._last_result: Optional[dict] = None
+        # Per-pair cache: {"BTC/USDT": {"time": ..., "result": ...}}
+        self._cache: dict[str, dict] = {}
         self._model = None
 
     def _init_model(self):
@@ -53,7 +46,8 @@ class GeminiBrain:
         try:
             import google.generativeai as genai
             genai.configure(api_key=api_key)
-            self._model = genai.GenerativeModel("gemini-2.5-flash")
+            # gemini-2.5-flash-lite: lighter model with higher free tier quota
+            self._model = genai.GenerativeModel("gemini-2.5-flash-lite")
             logger.info("Gemini AI brain initialized")
             return True
         except ImportError:
@@ -70,14 +64,14 @@ class GeminiBrain:
         """Ask Gemini to analyze current market conditions.
 
         Returns dict with: direction, confidence, reasoning
-        Rate-limited to avoid exceeding API quota.
-        rag_context: historical pattern context from RAG memory (Phase 5)
+        Per-pair rate limiting to avoid exceeding API quota.
         """
-        # Rate limiting — return cached result if too soon
         now = time.time()
-        if now - self._last_call_time < self._min_interval and self._last_result:
-            logger.debug("Gemini rate limited, using cached result")
-            return self._last_result
+
+        # Per-pair rate limiting — return cached result for THIS pair if too soon
+        cached = self._cache.get(pair)
+        if cached and (now - cached["time"] < self._min_interval):
+            return cached["result"]
 
         if not self._init_model():
             return {"direction": "HOLD", "confidence": 0.0,
@@ -89,32 +83,27 @@ class GeminiBrain:
             response = await self._call_gemini(prompt)
             result = self._parse_response(response)
 
-            self._last_call_time = now
-            self._last_result = result
-            logger.info("Gemini analysis for %s: %s (%.2f confidence)",
-                       pair, result["direction"], result["confidence"])
+            # Cache per pair
+            self._cache[pair] = {"time": now, "result": result}
+            logger.info("Gemini analysis for %s: %s (%.2f confidence) — %s",
+                       pair, result["direction"], result["confidence"],
+                       result["reasoning"][:80])
             return result
 
         except Exception as e:
-            logger.error("Gemini analysis failed: %s", e)
+            logger.error("Gemini analysis failed for %s: %s", pair, e)
             return {"direction": "HOLD", "confidence": 0.0,
                     "reasoning": f"analysis failed: {e}"}
 
     def _build_prompt(self, pair: str, price: float, indicators: dict,
                       regime: str, recent_prices: list[float],
                       rag_context: str = "") -> str:
-        """Build the analysis prompt for Gemini.
-
-        If RAG context is provided (Phase 5), includes historical
-        pattern matches so Gemini can learn from past trades.
-        """
-        # Calculate simple trend from recent prices
+        """Build the analysis prompt for Gemini."""
         if len(recent_prices) >= 2:
             change_pct = ((recent_prices[-1] - recent_prices[0]) / recent_prices[0]) * 100
         else:
             change_pct = 0
 
-        # RAG memory section — only included when historical data exists
         history_section = ""
         if rag_context:
             history_section = f"\n{rag_context}\n"
@@ -158,7 +147,6 @@ Respond in EXACTLY this JSON format, nothing else:
     def _parse_response(self, text: str) -> dict:
         """Parse Gemini's JSON response. Falls back to HOLD on parse error."""
         try:
-            # Strip markdown code fences if present
             clean = text.strip()
             if clean.startswith("```"):
                 clean = clean.split("\n", 1)[1]

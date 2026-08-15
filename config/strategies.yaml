@@ -33,10 +33,11 @@ grid:
 
 # Strategy 3: Trend Momentum (EMA/MACD/ADX)
 # Rides established trends with EMA crossover + multiple confirmations
-# Only trades when ADX > 25 (strong directional movement required)
+# ADX > 20 = moderate trend (academic research threshold for momentum)
+# 25 was too strict — filtered out valid setups in transitioning markets
 momentum:
   enabled: true
-  adx_min: 25              # regime gate: ADX must be > 25 (strong trend only)
+  adx_min: 20              # regime gate: ADX > 20 (momentum research standard)
   stop_loss_pct: 0.5       # 0.5% stop loss (tight — cut losers fast)
   take_profit_pct: 2.0     # 2.0% take profit (R:R = 4:1, momentum carries)
   cooldown_candles: 10     # 50 min between trades

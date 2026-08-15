@@ -8,11 +8,15 @@
 # 4. Multi-timeframe alignment (5m + 15m + 1h must agree)
 # 5. Cross-asset correlation (BTC trend affects altcoins)
 #
-# RULES:
-# - At least 3 of 5 brains must agree on direction
-# - No brain can show a STRONG opposing signal (confidence > 0.7)
-# - HOLD counts as neutral (neither for nor against)
-# - Final confidence = average of agreeing brains
+# CONSENSUS RULES:
+# - Uses percentage-based consensus: >= 60% of VOTING brains must agree
+# - A "voting" brain is one with a BUY or SELL opinion (HOLD = abstain)
+# - Minimum 2 absolute votes required (1 brain alone can't trigger a trade)
+# - No brain can show a STRONG opposing signal (confidence > 0.65)
+#
+# This adapts to however many brains are active. In quiet markets where
+# only 2-3 brains have opinions, 2 agreeing is enough. In volatile markets
+# where all 5 fire, you need 3+.
 
 from dataclasses import dataclass, field
 import logging
@@ -21,8 +25,10 @@ logger = logging.getLogger(__name__)
 
 # Confidence threshold above which an opposing signal vetoes the trade
 VETO_THRESHOLD = 0.65
-# Minimum brains that must agree — 3/5 = majority vote
-MIN_CONSENSUS = 3
+# Minimum percentage of voting brains that must agree
+CONSENSUS_PCT = 0.60
+# Absolute minimum — even if only 1 brain voted at 100%, still need 2
+MIN_ABSOLUTE_VOTES = 2
 
 
 @dataclass(frozen=True)
@@ -56,16 +62,16 @@ class GateDecision:
 
 
 class TradeGate:
-    """Evaluates signals from all 5 brains and decides whether to trade.
+    """Evaluates signals from all brains and decides whether to trade.
 
-    This is the central decision point. No trade bypasses the gate.
+    Uses percentage-based consensus that adapts to the number of active brains.
     """
 
-    def __init__(self, min_consensus: int = MIN_CONSENSUS,
+    def __init__(self, consensus_pct: float = CONSENSUS_PCT,
+                 min_absolute: int = MIN_ABSOLUTE_VOTES,
                  veto_threshold: float = VETO_THRESHOLD):
-        # How many brains must agree
-        self._min_consensus = min_consensus
-        # Opposing confidence above this → veto
+        self._consensus_pct = consensus_pct
+        self._min_absolute = min_absolute
         self._veto_threshold = veto_threshold
 
     def evaluate(self, signals: dict[str, BrainSignal]) -> GateDecision:
@@ -76,16 +82,29 @@ class TradeGate:
         """
         reasons = []
 
-        # Count votes for each direction
+        # Count votes for each direction (HOLD = abstain)
         buy_voters = []
         sell_voters = []
+        hold_count = 0
 
         for name, signal in signals.items():
             if signal.direction == "BUY":
                 buy_voters.append(signal)
             elif signal.direction == "SELL":
                 sell_voters.append(signal)
-            # HOLD → neutral, not counted
+            else:
+                hold_count += 1
+
+        total_voting = len(buy_voters) + len(sell_voters)
+
+        # Not enough brains voting at all
+        if total_voting < self._min_absolute:
+            reasons.append(f"only {total_voting} brains voted (need {self._min_absolute})")
+            return GateDecision(
+                approved=False, direction="HOLD",
+                confidence=0.0, agreeing_brains=0,
+                reasons=reasons,
+            )
 
         # Determine majority direction
         if len(buy_voters) >= len(sell_voters):
@@ -98,19 +117,21 @@ class TradeGate:
             opposing_signals = buy_voters
 
         agreeing = len(majority_signals)
+        agree_pct = agreeing / total_voting if total_voting > 0 else 0
 
-        # --- Check 1: Minimum consensus ---
-        if agreeing < self._min_consensus:
-            reasons.append(f"only {agreeing}/{self._min_consensus} brains agree on {majority_dir}")
-            for s in majority_signals:
-                reasons.append(f"  {s.source}: {s.direction} ({s.confidence:.2f})")
+        # Check 1: Percentage consensus
+        if agree_pct < self._consensus_pct or agreeing < self._min_absolute:
+            reasons.append(
+                f"{agreeing}/{total_voting} ({agree_pct:.0%}) agree on {majority_dir}, "
+                f"need {self._consensus_pct:.0%}"
+            )
             return GateDecision(
                 approved=False, direction="HOLD",
                 confidence=0.0, agreeing_brains=agreeing,
                 reasons=reasons,
             )
 
-        # --- Check 2: No strong opposing signal ---
+        # Check 2: No strong opposing signal (veto)
         for opp in opposing_signals:
             if opp.confidence >= self._veto_threshold:
                 reasons.append(
@@ -123,15 +144,15 @@ class TradeGate:
                     reasons=reasons,
                 )
 
-        # --- Approved: calculate combined confidence ---
+        # Approved — calculate combined confidence
         avg_confidence = sum(s.confidence for s in majority_signals) / len(majority_signals)
 
         for s in majority_signals:
             reasons.append(f"{s.source}: {s.direction} ({s.confidence:.2f})")
 
         logger.info(
-            "GATE APPROVED: %s with %d/%d brains, confidence %.2f",
-            majority_dir, agreeing, len(signals), avg_confidence,
+            "GATE APPROVED: %s with %d/%d brains (%.0f%%), confidence %.2f",
+            majority_dir, agreeing, total_voting, agree_pct * 100, avg_confidence,
         )
 
         return GateDecision(

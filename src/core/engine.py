@@ -13,7 +13,7 @@
 #    Brain 3: Gemini AI analysis (market conditions, sentiment)
 #    Brain 4: Multi-timeframe alignment (5m + 15m + 1h agree?)
 #    Brain 5: Cross-asset correlation (BTC trend affects alts)
-# 7. Trade Gate → 4/5 consensus required, veto on strong opposing
+# 7. Trade Gate → 60% of voting brains must agree, veto on strong opposing
 # 8. Risk validation → position sizing, SL/TP, balance check
 # 9. Adaptive sizing → increase on win streak, decrease on loss streak
 # 10. Execute → PaperTrader or live
@@ -503,16 +503,18 @@ class TradingEngine:
                     source="correlation",
                 )
 
-            # --- Step 6: Trade Gate — 3/5 consensus ---
-            if len(brain_signals) < 2:
-                logger.debug("Only %d brain signals for %s, need at least 2",
-                           len(brain_signals), pair)
-                return
+            # --- Step 6: Trade Gate — percentage-based consensus ---
+            # Log brain signal summary for diagnostics
+            brain_summary = {name: f"{s.direction}({s.confidence:.2f})"
+                            for name, s in brain_signals.items()}
+            logger.info("Brains for %s: %s | Strategy: %s",
+                       pair, brain_summary, strategy.name)
 
             gate_decision = self._trade_gate.evaluate(brain_signals)
 
             if not gate_decision.approved:
-                logger.debug("Gate rejected %s: %s", pair, gate_decision.reasons)
+                logger.info("Gate rejected %s: %s", pair, gate_decision.reasons[0]
+                           if gate_decision.reasons else "no reason")
                 return
 
             # --- Step 6b: Trade Quality Filter ---
@@ -557,17 +559,39 @@ class TradingEngine:
                 position_size *= 0.5
                 position_size = max(position_size, 10.0)
 
-            # --- Step 8: Execute the trade ---
+            # --- Step 8: Build executable signal ---
+            # If the strategy produced a directional signal, use its SL/TP.
+            # If the strategy said HOLD but other brains triggered the gate,
+            # build a signal from the gate's direction + strategy's default R:R.
+            if signal.direction == "HOLD" or signal.entry_price == 0.0:
+                sl_pct = strategy_config.get("stop_loss_pct", 0.6) / 100
+                tp_pct = strategy_config.get("take_profit_pct", 1.5) / 100
+                if gate_decision.direction == "BUY":
+                    exec_sl = round(current_price * (1 - sl_pct), 8)
+                    exec_tp = round(current_price * (1 + tp_pct), 8)
+                else:
+                    exec_sl = round(current_price * (1 + sl_pct), 8)
+                    exec_tp = round(current_price * (1 - tp_pct), 8)
+                from src.strategies.base import StrategySignal as SigType
+                signal = SigType(
+                    direction=gate_decision.direction,
+                    confidence=gate_decision.confidence,
+                    entry_price=current_price,
+                    stop_loss=exec_sl,
+                    take_profit=exec_tp,
+                    strategy_name=strategy.name,
+                    reasons=gate_decision.reasons,
+                )
+
+            # --- Step 9: Execute the trade ---
             trade = self._trader.execute_signal(signal, pair, position_size)
 
             if trade:
-                # Register smart exit (4-phase profit maximizer)
                 pos_id = f"{pair}_{signal.entry_price}"
                 self._smart_exit.register(
                     pos_id, pair, signal.direction.lower(),
                     signal.entry_price, signal.stop_loss, signal.take_profit,
                 )
-                # Also register trailing stop as backup
                 self._trailing_stops.register(
                     pos_id, pair, signal.direction.lower(),
                     signal.entry_price, signal.stop_loss,

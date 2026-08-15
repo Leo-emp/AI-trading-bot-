@@ -502,5 +502,82 @@ svg.arch {
     <div class="legend-item"><span class="legend-dot" style="background:#9B7FD4"></span>Memory &amp; Learning</div>
   </div>
 
+  <style>
+    .justifications { margin-top: 2rem; border-top: 1px solid #1C2E3E; padding-top: 1.5rem; }
+    .justifications h2 { font-size: 0.7rem; font-weight: 700; letter-spacing: 0.18em; color: var(--amber); margin-bottom: 1rem; }
+    .just-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem; }
+    .just-card { background: var(--surface); border: 1px solid #1C2E3E; border-radius: 6px; padding: 0.85rem 1rem; }
+    .just-card h3 { font-size: 0.8rem; font-weight: 600; color: var(--text-bright); margin-bottom: 0.3rem; }
+    .just-card .tech { font-size: 0.65rem; color: var(--amber); font-family: ui-monospace, monospace; margin-bottom: 0.4rem; }
+    .just-card p { font-size: 0.72rem; line-height: 1.55; color: var(--text); }
+    .just-card .alt { font-size: 0.65rem; color: var(--text-dim); margin-top: 0.35rem; font-style: italic; }
+  </style>
+
+  <div class="justifications">
+    <h2>TECHNOLOGY JUSTIFICATIONS</h2>
+    <div class="just-grid">
+      <div class="just-card">
+        <h3>Python</h3>
+        <div class="tech">Core Language</div>
+        <p>Python dominates quantitative finance for good reason: pandas/numpy for time-series manipulation, scikit-learn/XGBoost for ML, and the largest ecosystem of trading libraries (ccxt, ta-lib). The GIL is irrelevant here — the bot is I/O-bound (API calls), not CPU-bound.</p>
+        <p class="alt">Rejected: Rust/C++ (unnecessary latency optimization for 30s cycles), Node.js (weaker ML ecosystem)</p>
+      </div>
+      <div class="just-card">
+        <h3>Binance CEX</h3>
+        <div class="tech">Exchange</div>
+        <p>Highest global liquidity across altcoin pairs, robust REST + WebSocket API, maker fee as low as 0.075%. The ccxt library abstracts the API, making future exchange migration trivial. Binance's order book depth minimizes slippage on micro-account position sizes.</p>
+        <p class="alt">Rejected: DEXs (higher fees, MEV risk), Bybit/OKX (lower liquidity on target pairs)</p>
+      </div>
+      <div class="just-card">
+        <h3>Multi-Brain Consensus</h3>
+        <div class="tech">6 Independent Analysis Brains</div>
+        <p>No single strategy wins in all market conditions. The 6-brain architecture (technical, order flow, AI, multi-timeframe, correlation, ML) provides diversified signal sources. The 4/5 consensus requirement with veto power filters false positives — a brain that strongly disagrees can block a trade even if 4 others agree.</p>
+        <p class="alt">Rejected: single-strategy (fragile), majority-only voting (no veto for high-conviction dissent)</p>
+      </div>
+      <div class="just-card">
+        <h3>ChromaDB + RAG</h3>
+        <div class="tech">Vector Memory</div>
+        <p>Every trade is stored as a 16-dimensional market state vector. Before each new trade, the system retrieves the 5 most similar historical situations by cosine similarity. This gives the AI brain concrete precedents — "last time the market looked like this, we lost 2.3%" — rather than generic reasoning.</p>
+        <p class="alt">Rejected: SQL lookups (can't capture multi-dimensional market similarity), no memory (repeats mistakes)</p>
+      </div>
+      <div class="just-card">
+        <h3>XGBoost</h3>
+        <div class="tech">ML Classification</div>
+        <p>Gradient-boosted trees handle the tabular, feature-engineered nature of trading data better than neural networks at this data scale. XGBoost trains in seconds on 30 features, supports walk-forward validation (essential for non-stationary financial data), and provides feature importance for interpretability.</p>
+        <p class="alt">Rejected: LSTM/Transformer (overfits on small datasets), logistic regression (too simple for feature interactions)</p>
+      </div>
+      <div class="just-card">
+        <h3>Gemini AI</h3>
+        <div class="tech">LLM Analysis Brain</div>
+        <p>The AI brain uses Gemini to synthesize market conditions into natural language analysis, augmented with RAG context from past trades. This captures qualitative patterns (market regime changes, correlation breakdowns) that purely quantitative brains miss. The free tier supports the 30-second cycle budget.</p>
+        <p class="alt">Rejected: GPT-4 (higher cost per call), local LLM (insufficient reasoning quality)</p>
+      </div>
+      <div class="just-card">
+        <h3>Quarter-Kelly Position Sizing</h3>
+        <div class="tech">Risk Management</div>
+        <p>Full Kelly criterion maximizes long-term growth rate but produces volatile drawdowns. Quarter-Kelly reduces position sizes to 25% of the Kelly-optimal, sacrificing ~12% of theoretical returns for ~75% reduction in drawdown variance. Critical for micro accounts where a single bad trade can be catastrophic.</p>
+        <p class="alt">Rejected: fixed percentage (ignores edge quality), full Kelly (unacceptable drawdowns on $20–100 accounts)</p>
+      </div>
+      <div class="just-card">
+        <h3>Oracle Cloud (Always Free)</h3>
+        <div class="tech">Deployment</div>
+        <p>Oracle's Always Free tier provides an ARM VM with 24GB RAM and 4 OCPUs — permanently free, not a trial. This runs the bot 24/7 with zero infrastructure cost. The ARM architecture handles Python workloads efficiently, and the generous RAM accommodates ChromaDB's in-memory vector index.</p>
+        <p class="alt">Rejected: AWS/GCP free tier (expires after 12 months), home server (uptime unreliable), Heroku (no free tier)</p>
+      </div>
+      <div class="just-card">
+        <h3>Limit Orders Only</h3>
+        <div class="tech">Execution Strategy</div>
+        <p>Market orders pay taker fees (0.1%) and suffer slippage. Limit orders pay maker fees (0.075%) and guarantee fill price. On a micro account, the 0.025% fee difference per trade compounds significantly over hundreds of trades. The 30-second cycle provides enough time for limit order fills.</p>
+        <p class="alt">Rejected: market orders (higher fees + slippage), mixed (complexity without proportional benefit at this scale)</p>
+      </div>
+      <div class="just-card">
+        <h3>5-Layer Protection</h3>
+        <div class="tech">Autonomous Safety</div>
+        <p>Each layer operates independently: L1 (per-trade stop-loss/take-profit), L2 (session pause after consecutive losses), L3 (portfolio-wide exposure limits), L4 (black swan detection with emergency exit), L5 (auto-recovery after cooldown). If any single layer fails, the others still protect capital. No human intervention required.</p>
+        <p class="alt">Rejected: single stop-loss (insufficient for cascading failures), manual oversight (defeats 24/7 autonomy)</p>
+      </div>
+    </div>
+  </div>
+
   <p class="footer">Multi-Agent AI Trading System &middot; github.com/Leo-emp/AI-trading-bot-</p>
 </div>

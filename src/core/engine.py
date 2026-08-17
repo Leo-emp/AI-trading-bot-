@@ -51,6 +51,8 @@ from src.execution.paper_trader import PaperTrader
 from src.execution.trailing_stop import TrailingStopManager
 from src.execution.smart_exit import SmartExitManager
 from src.execution.adaptive_sizer import AdaptiveSizer
+from src.intelligence.adaptive_params import AdaptiveParams
+from src.intelligence.trade_journal import TradeJournal
 from src.notifications.telegram import TelegramNotifier
 from src.storage.database import Database
 from src.ai.embeddings import EmbeddingEngine, MarketSnapshot
@@ -120,6 +122,10 @@ class TradingEngine:
         self._smart_exit = SmartExitManager()
         self._adaptive_sizer = AdaptiveSizer()
 
+        # Adaptive intelligence — ATR-based dynamic SL/TP/sizing
+        self._adaptive_params = AdaptiveParams()
+        self._trade_journal = TradeJournal()
+
         # Phase 4: ML pipeline
         self._ml_model = MLModel()
         self._feature_engineer = FeatureEngineer()
@@ -135,6 +141,9 @@ class TradingEngine:
         self._cycle_count = 0
         self._last_daily_summary = None
         self._price_history: dict[str, list[float]] = {}
+        # P0.1: Last known prices per pair — used for equity calculation
+        # so protection system sees true account value, not just cash
+        self._last_prices: dict[str, float] = {}
 
     async def start(self):
         """Initialize all components and connect to exchange."""
@@ -260,6 +269,135 @@ class TradingEngine:
             reason=kwargs.get("reason", ""),
         )
 
+    async def _manage_open_positions(self):
+        """P0.1: Manage ALL open positions independently of the signal pipeline.
+
+        This runs EVERY cycle, even when:
+        - Protection is PAUSED (cash looks low because capital is in positions)
+        - Macro calendar is pausing new trades
+        - Binance candle fetch fails for new signals
+        - No new strategy signals exist
+
+        Position exits are RISK MANAGEMENT, not trade-entry logic.
+        They must never be blocked by the new-trade pipeline.
+        """
+        positions = self._trader.get_open_positions()
+        if not positions:
+            return
+
+        # Get unique pairs that have open positions
+        pairs_with_positions = sorted({pos.pair for pos in positions})
+
+        for pair in pairs_with_positions:
+            try:
+                # Fetch fresh 1-minute candle for accurate high/low
+                df = await self._client.get_historical_ohlcv(pair, "1m", limit=2)
+                if df.empty:
+                    logger.warning("EXIT CHECK: no price data for %s, skipping", pair)
+                    continue
+
+                latest = df.iloc[-1]
+                current_price = float(latest["close"])
+                candle_high = float(latest["high"])
+                candle_low = float(latest["low"])
+
+                # Cache price for equity calculation
+                self._last_prices[pair] = current_price
+
+                # P0.7: Diagnostic logging for every position on this pair
+                pair_positions = [p for p in positions if p.pair == pair]
+                for pos in pair_positions:
+                    pos_id = f"{pos.pair}_{pos.entry_price}"
+                    age_hours = (time.time() - pos.opened_at) / 3600
+
+                    # Calculate unrealized P&L for this position
+                    if pos.side == "buy":
+                        unrealized = (current_price - pos.entry_price) * pos.quantity
+                    else:
+                        unrealized = (pos.entry_price - current_price) * pos.quantity
+
+                    logger.info(
+                        "EXIT CHECK | %s %s | entry=%.2f current=%.2f | "
+                        "low=%.2f high=%.2f | SL=%.2f TP=%.2f | "
+                        "age=%.1fh | unrealizedPnL=$%.2f",
+                        pos.side.upper(), pos.pair,
+                        pos.entry_price, current_price,
+                        candle_low, candle_high,
+                        pos.stop_loss, pos.take_profit,
+                        age_hours, unrealized,
+                    )
+
+                    # Update smart exit (4-phase: normal -> breakeven -> trail -> tight)
+                    exit_state = self._smart_exit.update(pos_id, current_price)
+                    if exit_state:
+                        if exit_state.current_sl != pos.stop_loss:
+                            old_sl = pos.stop_loss
+                            pos.stop_loss = exit_state.current_sl
+                            logger.info(
+                                "SMART EXIT | %s %s | phase=%d | SL moved %.2f -> %.2f",
+                                pos.side.upper(), pos.pair, exit_state.phase,
+                                old_sl, pos.stop_loss,
+                            )
+
+                        # P0.5: Fix short trailing stop — use min() for sells, max() for buys
+                        new_stop = self._trailing_stops.update(pos_id, current_price)
+                        if new_stop is not None:
+                            if pos.side == "buy" and new_stop > pos.stop_loss:
+                                pos.stop_loss = new_stop
+                            elif pos.side == "sell" and new_stop < pos.stop_loss:
+                                pos.stop_loss = new_stop
+
+                        # Once trailing is active, widen TP so trailing stop handles exit
+                        if exit_state.phase >= 3:
+                            original_tp_dist = abs(exit_state.original_tp - exit_state.entry_price)
+                            extended_tp = (pos.entry_price + original_tp_dist * 3
+                                          if pos.side == "buy"
+                                          else pos.entry_price - original_tp_dist * 3)
+                            pos.take_profit = extended_tp
+
+                    # Update trade journal MFE/MAE
+                    self._trade_journal.update_price(pos_id, current_price)
+
+                # P0.4: Pass candle high/low so SL/TP checks catch intra-candle wicks
+                current_prices = {pair: current_price}
+                highs = {pair: candle_high}
+                lows = {pair: candle_low}
+                closed = self._trader.check_open_positions(current_prices, highs=highs, lows=lows)
+
+                for trade in closed:
+                    pos_id = f"{trade.pair}_{trade.entry_price}"
+                    close_reason = getattr(trade, "close_reason", "unknown")
+                    trade_status = getattr(trade, "status", "closed")
+
+                    # P0.6: Only remove exit managers for FULLY closed trades
+                    # Partial closes must keep their smart exit and trailing stop active
+                    if trade_status == "closed":
+                        self._trailing_stops.remove(pos_id)
+                        self._smart_exit.remove(pos_id)
+
+                        # Close in trade journal and feed adaptive learning
+                        journal_record = self._trade_journal.close_trade(
+                            pos_id, trade.exit_price, trade.pnl, close_reason,
+                        )
+                        if journal_record:
+                            self._adaptive_params.record_outcome(journal_record)
+
+                        logger.info(
+                            "TRADE CLOSED | %s %s | reason=%s | pnl=$%.4f | balance=$%.2f",
+                            trade.side.upper(), trade.pair, close_reason,
+                            trade.pnl, self._trader.get_balance(),
+                        )
+                    else:
+                        logger.info(
+                            "PARTIAL CLOSE | %s %s | reason=%s | pnl=$%.4f",
+                            trade.side.upper(), trade.pair, close_reason, trade.pnl,
+                        )
+
+                    await self._event_bus.emit("trade_closed", trade=trade)
+
+            except Exception as e:
+                logger.error("Position management error for %s: %s", pair, e)
+
     async def run(self):
         """Main trading loop. Runs until stop() is called."""
         if not self._running:
@@ -275,10 +413,29 @@ class TradingEngine:
                 self._cycle_count += 1
                 logger.info("--- Cycle %d ---", self._cycle_count)
 
-                # Step 1: Check protection system
-                balance = self._trader.get_balance()
+                # P0.1: ALWAYS manage open positions FIRST — before protection.
+                # Position exits are risk management and must never be blocked
+                # by protection/macro gates. A PAUSE should stop NEW trades,
+                # not prevent existing positions from hitting SL/TP/time exit.
+                await self._manage_open_positions()
+
+                # P0.2: Use EQUITY (cash + position value) not just cash balance.
+                # Opening 4 × $20K positions drops cash to $20K, but equity is
+                # still ~$100K. Without this, protection sees a fake 80% drawdown
+                # and triggers PAUSE, which blocks position management (now fixed
+                # above), but also blocks new trades unnecessarily.
+                equity = self._trader.get_equity(self._last_prices)
+                cash = self._trader.get_balance()
+                logger.info(
+                    "ACCOUNT | cash=$%.2f | equity=$%.2f | positions=%d | unrealizedPnL=$%.2f",
+                    cash, equity,
+                    len(self._trader.get_open_positions()),
+                    self._trader.get_unrealized_pnl(self._last_prices),
+                )
+
+                # Step 1: Check protection system — using EQUITY not cash
                 protection_status = self._protection.check(
-                    current_balance=balance,
+                    current_balance=equity,
                     initial_balance=self._trader.get_initial_balance(),
                 )
 
@@ -290,7 +447,7 @@ class TradingEngine:
                     break
 
                 if protection_status.action in ("PAUSE", "EMERGENCY_SELL"):
-                    logger.warning("PAUSED: %s", protection_status.reason)
+                    logger.warning("PAUSED (new trades only): %s", protection_status.reason)
                     await self._event_bus.emit("protection_triggered",
                                                layer="session", action=protection_status.action,
                                                reason=protection_status.reason)
@@ -300,14 +457,14 @@ class TradingEngine:
                 # Step 1b: Check macro event calendar (Fed, CPI, NFP)
                 macro_status = self._macro_calendar.check()
                 if macro_status["should_pause"]:
-                    logger.warning("MACRO PAUSE: %s", macro_status["reason"])
+                    logger.warning("MACRO PAUSE (new trades only): %s", macro_status["reason"])
                     await self._event_bus.emit("protection_triggered",
                                                layer="macro", action="PAUSE",
                                                reason=macro_status["reason"])
                     await asyncio.sleep(interval)
                     continue
 
-                # Step 2: Process each pair
+                # Step 2: Process each pair (signal generation + new trade entry only)
                 for pair in pairs:
                     await self._process_pair(pair, protection_status)
 
@@ -358,45 +515,10 @@ class TradingEngine:
             # Update correlation tracker
             self._correlation.update(pair, current_price)
 
-            # --- Step 2: Check open positions with SMART EXIT ---
-            # Smart exit replaces fixed TP — lets winners run further
-            current_prices = {pair: current_price}
-
-            # Only check positions for THIS pair — passing BTC's price
-            # to ETH's smart exit would corrupt the SL to BTC-range values
-            for pos in self._trader.get_open_positions():
-                if pos.pair != pair:
-                    continue
-
-                pos_id = f"{pos.pair}_{pos.entry_price}"
-
-                # Update smart exit (4-phase: normal → breakeven → trail → tight)
-                exit_state = self._smart_exit.update(pos_id, current_price)
-                if exit_state:
-                    # Smart exit updates the stop loss dynamically
-                    if exit_state.current_sl != pos.stop_loss:
-                        pos.stop_loss = exit_state.current_sl
-
-                    # Also update trailing stop manager as backup
-                    new_stop = self._trailing_stops.update(pos_id, current_price)
-                    if new_stop and new_stop > pos.stop_loss:
-                        pos.stop_loss = new_stop
-
-                    # Once trailing is active, widen TP so trailing stop handles exit
-                    # Use ORIGINAL TP from smart exit state to avoid compounding
-                    if exit_state.phase >= 3:
-                        original_tp_dist = abs(exit_state.original_tp - exit_state.entry_price)
-                        extended_tp = (pos.entry_price + original_tp_dist * 3
-                                      if pos.side == "buy"
-                                      else pos.entry_price - original_tp_dist * 3)
-                        pos.take_profit = extended_tp
-
-            closed = self._trader.check_open_positions(current_prices)
-            for trade in closed:
-                pos_id = f"{trade.pair}_{trade.entry_price}"
-                self._trailing_stops.remove(pos_id)
-                self._smart_exit.remove(pos_id)
-                await self._event_bus.emit("trade_closed", trade=trade)
+            # Position management now handled by _manage_open_positions()
+            # which runs EVERY cycle before protection checks.
+            # Cache current price for other uses in this method.
+            self._last_prices[pair] = current_price
 
             # --- Step 3: Detect market regime ---
             regime = self._regime_detector.detect(df_5m)
@@ -490,11 +612,11 @@ class TradingEngine:
                         source="gemini_ai",
                     )
             except Exception as e:
-                logger.debug("Gemini brain error: %s", e)
+                logger.info("Gemini brain skipped for %s: %s", pair, e)
 
             # Brain 4: Multi-timeframe alignment
+            tf_data = {"5m": df_5m}  # init outside try so filter can use it
             try:
-                tf_data = {"5m": df_5m}
                 # Fetch 15m and 1h candles
                 df_15m = await self._client.get_historical_ohlcv(pair, "15m", limit=100)
                 if not df_15m.empty and len(df_15m) >= 30:
@@ -536,8 +658,45 @@ class TradingEngine:
                            if gate_decision.reasons else "no reason")
                 return
 
+            # Require at least one PRIMARY brain (strategy or gemini_ai)
+            # Order book + multi_timeframe alone are support signals, not entries
+            primary_brains = {"strategy", "gemini_ai"}
+            has_primary = any(name in brain_signals for name in primary_brains)
+            if not has_primary:
+                logger.info("Skipping %s: no primary brain (strategy/gemini) voted", pair)
+                return
+
             # --- Step 6b: Trade Quality Filter ---
             # Gate says direction is correct, filter checks conditions are right
+
+            # Feed 1h trend to filter (PROVEN: trading with trend wins 55-65%)
+            try:
+                if "1h" in tf_data:
+                    df_1h_local = tf_data["1h"]
+                    if len(df_1h_local) >= 20:
+                        ema_fast_1h = df_1h_local["close"].ewm(span=8).mean().iloc[-1]
+                        ema_slow_1h = df_1h_local["close"].ewm(span=21).mean().iloc[-1]
+                        close_1h = df_1h_local["close"].iloc[-1]
+                        if close_1h > ema_fast_1h > ema_slow_1h:
+                            self._trade_filter.set_hourly_trend(pair, "UP")
+                        elif close_1h < ema_fast_1h < ema_slow_1h:
+                            self._trade_filter.set_hourly_trend(pair, "DOWN")
+                        else:
+                            self._trade_filter.set_hourly_trend(pair, "NEUTRAL")
+            except Exception:
+                pass
+
+            # Feed ATR ratio to filter (PROVEN: dead markets = random walks)
+            try:
+                atr_col = df_5m.get("atr")
+                if atr_col is not None and len(atr_col.dropna()) >= 20:
+                    current_atr = atr_col.iloc[-1]
+                    avg_atr = atr_col.iloc[-20:].mean()
+                    if avg_atr > 0:
+                        self._trade_filter.set_atr_ratio(pair, current_atr / avg_atr)
+            except Exception:
+                pass
+
             spread_pct = 0.0
             try:
                 order_book_data = await self._client.get_order_book(pair)
@@ -553,6 +712,7 @@ class TradingEngine:
                 spread_pct=spread_pct,
                 open_positions=self._trader.get_open_positions(),
                 pair=pair,
+                trade_direction=gate_decision.direction,
             )
             if not filter_result["pass"]:
                 logger.info("Trade filter blocked %s: %s", pair, filter_result["reason"])
@@ -563,14 +723,65 @@ class TradingEngine:
                 logger.info("Risk manager blocked trade for %s", pair)
                 return
 
-            position_size = self._risk_manager.get_position_size(
+            # --- Step 8: ADAPTIVE INTELLIGENCE — ATR-based SL/TP/sizing ---
+            # Use 1-HOUR ATR (not 5m) because trades hold up to 12 hours.
+            # 5m ATR is tiny noise ($0.30 for BNB) → everything hits minimum floor.
+            # 1h ATR captures actual volatility range we're trading within.
+            atr_value = 0
+            if "1h" in tf_data:
+                try:
+                    h = tf_data["1h"]
+                    if len(h) >= 15:
+                        # Compute ATR directly from 1h OHLCV
+                        high = h["high"].values
+                        low = h["low"].values
+                        close_arr = h["close"].values
+                        trs = []
+                        for i in range(1, len(high)):
+                            tr = max(
+                                high[i] - low[i],
+                                abs(high[i] - close_arr[i - 1]),
+                                abs(low[i] - close_arr[i - 1]),
+                            )
+                            trs.append(tr)
+                        if len(trs) >= 14:
+                            atr_value = sum(trs[-14:]) / 14
+                except Exception:
+                    pass
+            if atr_value <= 0:
+                # Fallback: 5m ATR exists but is too small for SL/TP
+                atr_5m = float(latest.get("atr", 0))
+                # Scale up: 1h ≈ 4-5× the 5m ATR (volatility scaling)
+                atr_value = atr_5m * 5 if atr_5m > 0 else current_price * 0.008
+
+            # P0.3: TradeGate is AUTHORITATIVE on direction.
+            # The old code let the strategy signal override the gate's consensus,
+            # which meant the gate could say SELL but execution would use BUY.
+            direction = gate_decision.direction
+            if signal.direction != direction:
+                logger.warning(
+                    "DIRECTION MISMATCH | %s | strategy=%s gate=%s | using gate",
+                    pair, signal.direction, direction,
+                )
+
+            # Get volume ratio for momentum multiplier
+            vol_ratio = float(latest.get("volume_ratio", 1.0))
+
+            dynamic = self._adaptive_params.calculate(
+                entry_price=current_price,
+                direction=direction,
+                atr=atr_value,
                 balance=self._trader.get_balance(),
-                win_rate=self._performance_tracker.get_win_rate(strategy.name),
-                avg_win=0.008,
-                avg_loss=0.004,
+                regime=regime.regime,
+                strategy=strategy.name,
+                confidence=gate_decision.confidence,
+                volume_ratio=vol_ratio,
             )
 
-            # Apply adaptive sizing — bigger on win streaks, smaller on loss streaks
+            # Use adaptive position size instead of Kelly
+            position_size = dynamic.position_size
+
+            # Apply adaptive sizing multiplier (win/loss streaks)
             position_size = self._adaptive_sizer.adjust_size(position_size)
 
             # Reduce size if protection says so
@@ -578,42 +789,54 @@ class TradingEngine:
                 position_size *= 0.5
                 position_size = max(position_size, 10.0)
 
-            # --- Step 8: Build executable signal ---
-            # If the strategy produced a directional signal, use its SL/TP.
-            # If the strategy said HOLD but other brains triggered the gate,
-            # build a signal from the gate's direction + strategy's default R:R.
-            if signal.direction == "HOLD" or signal.entry_price == 0.0:
-                sl_pct = strategy_config.get("stop_loss_pct", 0.6) / 100
-                tp_pct = strategy_config.get("take_profit_pct", 1.5) / 100
-                if gate_decision.direction == "BUY":
-                    exec_sl = round(current_price * (1 - sl_pct), 8)
-                    exec_tp = round(current_price * (1 + tp_pct), 8)
-                else:
-                    exec_sl = round(current_price * (1 + sl_pct), 8)
-                    exec_tp = round(current_price * (1 - tp_pct), 8)
-                from src.strategies.base import StrategySignal as SigType
-                signal = SigType(
-                    direction=gate_decision.direction,
-                    confidence=gate_decision.confidence,
-                    entry_price=current_price,
-                    stop_loss=exec_sl,
-                    take_profit=exec_tp,
-                    strategy_name=strategy.name,
-                    reasons=gate_decision.reasons,
-                )
+            # Build the executable signal with ATR-based SL/TP
+            from src.strategies.base import StrategySignal as SigType
+            signal = SigType(
+                direction=direction,
+                confidence=gate_decision.confidence,
+                entry_price=current_price,
+                stop_loss=dynamic.stop_loss,
+                take_profit=dynamic.take_profit,
+                strategy_name=strategy.name,
+                reasons=gate_decision.reasons,
+            )
 
             # --- Step 9: Execute the trade ---
             trade = self._trader.execute_signal(signal, pair, position_size)
 
             if trade:
                 pos_id = f"{pair}_{signal.entry_price}"
+
+                # Register with smart exit using ATR-based thresholds
+                # (not fixed 0.2%/0.5%/0.8% — adapts to volatility)
+                exit_thresholds = self._adaptive_params.get_smart_exit_thresholds(
+                    atr=atr_value, entry_price=current_price, regime=regime.regime,
+                )
                 self._smart_exit.register(
                     pos_id, pair, signal.direction.lower(),
                     signal.entry_price, signal.stop_loss, signal.take_profit,
+                    breakeven_pct=exit_thresholds["breakeven_pct"],
+                    trail_activate_pct=exit_thresholds["trail_activate_pct"],
+                    tight_activate_pct=exit_thresholds["tight_activate_pct"],
+                    trail_distance_pct=exit_thresholds["trail_distance_pct"],
+                    tight_trail_pct=exit_thresholds["tight_trail_pct"],
                 )
                 self._trailing_stops.register(
                     pos_id, pair, signal.direction.lower(),
                     signal.entry_price, signal.stop_loss,
+                )
+
+                # Register with trade journal for MFE/MAE tracking
+                self._trade_journal.open_trade(
+                    pos_id=pos_id, pair=pair,
+                    side=signal.direction.lower(),
+                    strategy=strategy.name, regime=regime.regime,
+                    entry_price=signal.entry_price,
+                    stop_loss=signal.stop_loss,
+                    take_profit=signal.take_profit,
+                    position_size=position_size,
+                    confidence=gate_decision.confidence,
+                    atr=atr_value,
                 )
 
                 await self._event_bus.emit(
@@ -626,11 +849,15 @@ class TradingEngine:
 
                 logger.info(
                     "TRADE EXECUTED: %s %s via %s | Entry: $%.2f | "
-                    "SL: $%.2f | TP: $%.2f | Size: $%.2f | "
-                    "Gate: %d brains agreed (%.0f%% conf) | Regime: %s",
+                    "SL: $%.2f (%.2f%%) | TP: $%.2f (%.2f%%) | "
+                    "Size: $%.0f | R:R=%.1f:1 | "
+                    "Gate: %d brains (%.0f%% conf) | Regime: %s",
                     signal.direction, pair, strategy.name,
-                    signal.entry_price, signal.stop_loss, signal.take_profit,
-                    position_size, gate_decision.agreeing_brains,
+                    signal.entry_price,
+                    signal.stop_loss, dynamic.sl_distance_pct,
+                    signal.take_profit, dynamic.tp_distance_pct,
+                    position_size, dynamic.risk_reward,
+                    gate_decision.agreeing_brains,
                     gate_decision.confidence * 100, regime.regime,
                 )
 

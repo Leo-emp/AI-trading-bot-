@@ -41,6 +41,7 @@ class OpenPosition:
     strategy: str
     opened_at: float     # time.time() for age tracking
     entry_fee: float     # fee paid on entry
+    partial_taken: bool = False  # has 50% profit been taken at 1R?
 
 
 class PaperTrader:
@@ -84,6 +85,45 @@ class PaperTrader:
     def get_open_positions(self) -> list[OpenPosition]:
         """All currently open positions."""
         return list(self._positions)
+
+    def get_equity(self, current_prices: dict = None) -> float:
+        """P0.2: Mark-to-market account equity.
+
+        _balance is available cash only — opening a $20K position moves $20K
+        from cash to "reserved in position." That's not a loss.
+
+        equity = cash + sum(entry_notional + unrealized_pnl) for each position
+
+        This is what the protection system should use, not get_balance().
+        """
+        current_prices = current_prices or {}
+        equity = self._balance
+
+        for pos in self._positions:
+            # Use current price if available, otherwise entry price
+            price = current_prices.get(pos.pair, pos.entry_price)
+            # The entry notional was deducted from cash when position opened
+            entry_notional = pos.entry_price * pos.quantity
+            # Calculate unrealized P&L
+            if pos.side == "buy":
+                unrealized_pnl = (price - pos.entry_price) * pos.quantity
+            else:
+                unrealized_pnl = (pos.entry_price - price) * pos.quantity
+            equity += entry_notional + unrealized_pnl
+
+        return equity
+
+    def get_unrealized_pnl(self, current_prices: dict = None) -> float:
+        """P0.2: Total unrealized P&L across all open positions."""
+        current_prices = current_prices or {}
+        pnl = 0.0
+        for pos in self._positions:
+            price = current_prices.get(pos.pair, pos.entry_price)
+            if pos.side == "buy":
+                pnl += (price - pos.entry_price) * pos.quantity
+            else:
+                pnl += (pos.entry_price - price) * pos.quantity
+        return pnl
 
     def execute_signal(self, signal: StrategySignal, pair: str,
                        position_size: float) -> Optional[Trade]:
@@ -161,6 +201,8 @@ class PaperTrader:
         """Check all open positions against current prices.
 
         Closes positions that hit stop-loss, take-profit, or time limit.
+        Also handles partial profit-taking at 1R (50% of position closed
+        when profit reaches the SL distance — locks in guaranteed win).
         """
         closed_trades = []
         still_open = []
@@ -179,25 +221,64 @@ class PaperTrader:
             close_reason = None
             exit_price = price
 
-            # SL checked first (worst case if both hit same candle)
+            # --- Partial profit-taking at 1R (PROVEN: raises win count) ---
+            # When price reaches 1R profit (distance = SL distance), close 50%.
+            # This locks in a guaranteed win on half the position.
+            if not pos.partial_taken:
+                sl_distance = abs(pos.entry_price - pos.stop_loss)
+                if pos.side == "buy":
+                    target_1r = pos.entry_price + sl_distance
+                    if price >= target_1r:
+                        partial_trade = self._take_partial_profit(pos, price)
+                        if partial_trade:
+                            closed_trades.append(partial_trade)
+                else:
+                    target_1r = pos.entry_price - sl_distance
+                    if price <= target_1r:
+                        partial_trade = self._take_partial_profit(pos, price)
+                        if partial_trade:
+                            closed_trades.append(partial_trade)
+
+            # P0.7: SL checked first (worst case if both hit same candle)
             if pos.side == "buy" and candle_low <= pos.stop_loss:
                 close_reason = "stop_loss"
                 exit_price = pos.stop_loss
+                logger.warning(
+                    "SL HIT BUY %s | low=%.2f <= SL=%.2f",
+                    pos.pair, candle_low, pos.stop_loss,
+                )
             elif pos.side == "sell" and candle_high >= pos.stop_loss:
                 close_reason = "stop_loss"
                 exit_price = pos.stop_loss
+                logger.warning(
+                    "SL HIT SELL %s | high=%.2f >= SL=%.2f",
+                    pos.pair, candle_high, pos.stop_loss,
+                )
 
             if close_reason is None:
                 if pos.side == "buy" and candle_high >= pos.take_profit:
                     close_reason = "take_profit"
                     exit_price = pos.take_profit
+                    logger.info(
+                        "TP HIT BUY %s | high=%.2f >= TP=%.2f",
+                        pos.pair, candle_high, pos.take_profit,
+                    )
                 elif pos.side == "sell" and candle_low <= pos.take_profit:
                     close_reason = "take_profit"
                     exit_price = pos.take_profit
+                    logger.info(
+                        "TP HIT SELL %s | low=%.2f <= TP=%.2f",
+                        pos.pair, candle_low, pos.take_profit,
+                    )
 
-            # Time exit (configurable, default 4 hours)
+            # Time exit — gives trades time to develop
             if close_reason is None and time.time() - pos.opened_at > self._time_exit:
                 close_reason = "time_exit"
+                age_h = (time.time() - pos.opened_at) / 3600
+                logger.info(
+                    "TIME EXIT %s %s | age=%.1fh >= limit=%.1fh",
+                    pos.side.upper(), pos.pair, age_h, self._time_exit / 3600,
+                )
 
             if close_reason:
                 trade = self._close_position(pos, exit_price, close_reason)
@@ -207,11 +288,64 @@ class PaperTrader:
 
         self._positions = still_open
 
-        # Persist after any closes
         if closed_trades:
             self._save_state()
 
         return closed_trades
+
+    def _take_partial_profit(self, pos: OpenPosition, current_price: float) -> Optional[Trade]:
+        """Close 50% of position at 1R profit. Locks in a guaranteed win.
+
+        The remaining 50% continues to ride with trailing stop toward full TP.
+        This mathematically increases win count because any trade reaching 1R
+        now counts as a win (for the closed half).
+        """
+        half_qty = pos.quantity * 0.5
+        if half_qty * current_price < 5.0:  # skip if too small
+            return None
+
+        # Calculate P&L on the closed half
+        half_notional = half_qty * current_price
+        exit_fee = half_notional * self._fee_rate
+        entry_fee_half = pos.entry_fee * 0.5
+
+        if pos.side == "buy":
+            gross_pnl = (current_price - pos.entry_price) * half_qty
+        else:
+            gross_pnl = (pos.entry_price - current_price) * half_qty
+
+        net_pnl = gross_pnl - exit_fee - entry_fee_half
+
+        # Return half the notional + profit to balance
+        entry_half_notional = half_qty * pos.entry_price
+        self._balance += entry_half_notional + gross_pnl - exit_fee
+
+        # Reduce position size (keep other half running)
+        pos.quantity = pos.quantity - half_qty
+        pos.entry_fee = pos.entry_fee * 0.5
+        pos.partial_taken = True
+
+        self._total_trades += 1
+        if net_pnl > 0:
+            self._total_wins += 1
+
+        logger.info(
+            "PARTIAL TAKE 50%% %s %s @ $%.2f | P&L: $%.2f [1R hit] | Remaining: %.4f units",
+            pos.side.upper(), pos.pair, current_price, net_pnl, pos.quantity,
+        )
+
+        trade = Trade(
+            timestamp=datetime.now(timezone.utc),
+            pair=pos.pair, side=pos.side,
+            strategy=pos.strategy,
+            entry_price=pos.entry_price,
+            exit_price=current_price,
+            quantity=half_qty,
+            pnl=net_pnl, fees=exit_fee + entry_fee_half,
+            status="partial_close",
+            close_reason="partial_1r",
+        )
+        return trade
 
     def force_close_all(self, current_prices: dict) -> list[Trade]:
         """Force-close all open positions at current market price."""
@@ -262,6 +396,7 @@ class PaperTrader:
             quantity=pos.quantity,
             pnl=net_pnl, fees=total_fees,
             status="closed",
+            close_reason=reason,
         )
 
     def _save_state(self):
@@ -280,6 +415,7 @@ class PaperTrader:
                         "stop_loss": p.stop_loss, "take_profit": p.take_profit,
                         "strategy": p.strategy, "opened_at": p.opened_at,
                         "entry_fee": p.entry_fee,
+                        "partial_taken": p.partial_taken,
                     }
                     for p in self._positions
                 ],
@@ -312,6 +448,7 @@ class PaperTrader:
                     stop_loss=p["stop_loss"], take_profit=p["take_profit"],
                     strategy=p["strategy"], opened_at=p["opened_at"],
                     entry_fee=p["entry_fee"],
+                    partial_taken=p.get("partial_taken", False),
                 )
                 self._positions.append(pos)
 

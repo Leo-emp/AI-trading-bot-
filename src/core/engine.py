@@ -985,13 +985,13 @@ class TradingEngine:
                 position_size *= 0.5
                 position_size = max(position_size, 10.0)
 
-            # PORTFOLIO EXPOSURE CHECK: max 50% notional, max 2% total initial risk
-            # Prevents correlated crypto positions from compounding losses
+            # PORTFOLIO EXPOSURE CHECK: max 50% margin, max 5% total initial risk
             if not self._risk_manager.check_portfolio_exposure(
                 balance=self._trader.get_balance(),
                 open_positions=self._trader.get_open_positions(),
                 new_position_size=position_size,
                 new_sl_pct=dynamic.sl_distance_pct,
+                leverage=dynamic.leverage,
             ):
                 logger.info("Portfolio exposure limit blocked %s", pair)
                 return
@@ -1008,8 +1008,9 @@ class TradingEngine:
                 reasons=gate_decision.reasons,
             )
 
-            # --- Step 9: Execute the trade ---
-            trade = self._trader.execute_signal(signal, pair, position_size)
+            # --- Step 9: Execute the trade (with futures leverage) ---
+            trade = self._trader.execute_signal(signal, pair, position_size,
+                                                leverage=dynamic.leverage)
 
             if trade:
                 pos_id = f"{pair}_{signal.entry_price}"
@@ -1059,13 +1060,14 @@ class TradingEngine:
                 logger.info(
                     "TRADE EXECUTED: %s %s via %s | Entry: $%.2f | "
                     "SL: $%.2f (%.2f%%) | TP: $%.2f (%.2f%%) | "
-                    "Size: $%.0f | R:R=%.1f:1 | "
-                    "Gate: %d brains (%.0f%% conf) | Regime: %s",
+                    "Notional: $%.0f | Margin: $%.0f | Leverage: %dx | "
+                    "R:R=%.1f:1 | Gate: %d brains (%.0f%% conf) | Regime: %s",
                     signal.direction, pair, strategy.name,
                     signal.entry_price,
                     signal.stop_loss, dynamic.sl_distance_pct,
                     signal.take_profit, dynamic.tp_distance_pct,
-                    position_size, dynamic.risk_reward,
+                    position_size, dynamic.margin_required, dynamic.leverage,
+                    dynamic.risk_reward,
                     gate_decision.agreeing_brains,
                     gate_decision.confidence * 100, regime.regime,
                 )

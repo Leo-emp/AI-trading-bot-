@@ -57,39 +57,43 @@ class RiskManager:
     def check_portfolio_exposure(self, balance: float,
                                   open_positions: list,
                                   new_position_size: float,
-                                  new_sl_pct: float) -> bool:
+                                  new_sl_pct: float,
+                                  leverage: int = 1) -> bool:
         """Check if adding a new position would exceed portfolio risk limits.
 
-        Limits:
-        - Max total open notional: 50% of balance
-        - Max total initial risk: 2% of balance
-        Both prevent correlated crypto positions from compounding losses.
+        With futures leverage, limits are MARGIN-based (not notional):
+        - Max total margin: 50% of balance (cash locked in positions)
+        - Max total initial risk: 5% of balance (sum of all SL risks)
         """
-        max_total_notional_pct = 0.50  # 50% of balance in open positions
-        max_total_risk_pct = 0.02      # 2% total initial risk across all positions
+        max_total_margin_pct = 0.50  # 50% of balance in margin
+        max_total_risk_pct = 0.05    # 5% total initial risk (raised for leverage)
 
-        # Calculate current total notional
-        total_notional = sum(
-            pos.quantity * pos.entry_price for pos in open_positions
-        )
+        # Calculate current total margin (leverage-aware)
+        total_margin = 0.0
+        for pos in open_positions:
+            if hasattr(pos, 'margin_locked') and pos.margin_locked > 0:
+                total_margin += pos.margin_locked
+            else:
+                total_margin += pos.quantity * pos.entry_price
 
-        # Calculate current total initial risk (each position's SL distance × size)
+        # Calculate current total initial risk (always uses notional × SL%)
         total_risk = 0.0
         for pos in open_positions:
             sl_dist = abs(pos.entry_price - pos.stop_loss) / pos.entry_price
             pos_notional = pos.quantity * pos.entry_price
             total_risk += pos_notional * sl_dist
 
-        # Check if adding new position exceeds notional limit
-        if (total_notional + new_position_size) > balance * max_total_notional_pct:
+        # Check margin limit (cash locked)
+        new_margin = new_position_size / leverage
+        if (total_margin + new_margin) > balance * max_total_margin_pct:
             logger.info(
-                "PORTFOLIO LIMIT: notional $%.0f + $%.0f > %.0f%% of $%.0f",
-                total_notional, new_position_size,
-                max_total_notional_pct * 100, balance,
+                "PORTFOLIO MARGIN LIMIT: margin $%.0f + $%.0f > %.0f%% of $%.0f",
+                total_margin, new_margin,
+                max_total_margin_pct * 100, balance,
             )
             return False
 
-        # Check if adding new position exceeds risk limit
+        # Check total risk limit
         new_risk = new_position_size * (new_sl_pct / 100)
         if (total_risk + new_risk) > balance * max_total_risk_pct:
             logger.info(

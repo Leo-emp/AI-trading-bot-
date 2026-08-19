@@ -42,12 +42,15 @@ class DynamicLevels:
     """Calculated SL/TP/size for one trade setup."""
     stop_loss: float        # absolute price for SL
     take_profit: float      # absolute price for TP
-    position_size: float    # USDT notional size
+    position_size: float    # USDT notional size (full exposure)
     sl_distance_pct: float  # % distance to SL (for logging)
     tp_distance_pct: float  # % distance to TP (for logging)
     risk_reward: float      # TP distance / SL distance
     atr_value: float        # raw ATR used
     risk_amount: float      # actual $ at risk if SL hit (for verification)
+    leverage: int = 1               # futures leverage multiplier
+    margin_required: float = 0.0    # cash locked (position_size / leverage)
+    liquidation_price: float = 0.0  # price at which position is force-closed
 
 
 class AdaptiveParams:
@@ -177,12 +180,11 @@ class AdaptiveParams:
             stop_loss = round(entry_price + sl_distance, 8)
             take_profit = round(entry_price - tp_distance, 8)
 
-        # --- Step 6: CONFIDENCE-SCALED risk-based position sizing ---
+        # --- Step 6: CONFIDENCE-SCALED risk + LEVERAGE ---
         # Base risk = 1% of balance. Scaled by confidence:
         #   60% consensus → 1× ($1,000 on $100K)
         #   80% consensus → 2× ($2,000) — strong agreement
         #  100% consensus → 3× ($3,000) — all brains agree, go big
-        # This puts serious money only on highest-conviction setups.
         if confidence >= 0.95:
             risk_mult = 3.0
         elif confidence >= 0.80:
@@ -193,40 +195,74 @@ class AdaptiveParams:
             risk_mult = 1.0
         risk_amount = balance * self._risk_pct * risk_mult
 
+        # FUTURES LEVERAGE: confidence → leverage tier
+        # Higher conviction = higher leverage = same margin controls more
+        #   <70% → 3×  (conservative, small positions)
+        #   70%  → 5×  (moderate)
+        #   80%  → 10× (strong — 4/5 brains agree)
+        #   95%+ → 20× (maximum — full consensus)
+        if confidence >= 0.95:
+            leverage = 20
+        elif confidence >= 0.80:
+            leverage = 10
+        elif confidence >= 0.70:
+            leverage = 5
+        else:
+            leverage = 3
+
         # Position size = risk / (distance to SL as fraction)
-        # Example: $500 risk / 0.5% SL = $100,000 position
-        # Example: $500 risk / 2.0% SL = $25,000 position
-        # This automatically sizes bigger for tight stops, smaller for wide stops
         if sl_pct > 0:
             position_size = risk_amount / sl_pct
         else:
             position_size = risk_amount
 
-        # Cap position size at max % of balance
-        max_pos = balance * self._max_pos_pct
-        position_size = min(position_size, max_pos)
+        # With leverage, cap MARGIN (cash locked) not notional.
+        # margin = notional / leverage, so max_notional = max_margin × leverage.
+        # $50K margin at 20× leverage = $1M notional exposure.
+        max_margin = balance * self._max_pos_pct
+        max_notional = max_margin * leverage
+        position_size = min(position_size, max_notional)
         position_size = max(position_size, self._min_pos)
 
+        margin_required = position_size / leverage
+
+        # Liquidation price (isolated margin, Binance-style)
+        # Long: liq ≈ entry × (1 - 1/leverage)
+        # Short: liq ≈ entry × (1 + 1/leverage)
+        maintenance_rate = 0.004
+        if direction.upper() == "BUY":
+            liquidation_price = entry_price * (1 - (1 / leverage) * (1 - maintenance_rate))
+        else:
+            liquidation_price = entry_price * (1 + (1 / leverage) * (1 - maintenance_rate))
+
+        # Safety: SL must be BEFORE liquidation price (with 2% buffer)
+        if direction.upper() == "BUY" and stop_loss <= liquidation_price:
+            stop_loss = round(liquidation_price * 1.02, 8)
+            sl_distance = entry_price - stop_loss
+            sl_pct = sl_distance / entry_price if entry_price > 0 else 0
+        elif direction.upper() == "SELL" and stop_loss >= liquidation_price:
+            stop_loss = round(liquidation_price * 0.98, 8)
+            sl_distance = stop_loss - entry_price
+            sl_pct = sl_distance / entry_price if entry_price > 0 else 0
+
         # --- Step 6b: VERIFY max loss doesn't exceed risk budget ---
-        # Safety check: recalculate actual risk after all caps/floors
         actual_risk = position_size * sl_pct
         if actual_risk > risk_amount:
-            # Position got capped in a way that still exceeds risk — resize
             position_size = risk_amount / sl_pct
             position_size = max(position_size, self._min_pos)
+            margin_required = position_size / leverage
 
         # --- Step 7: Calculate risk:reward ratio ---
         risk_reward = tp_pct / sl_pct if sl_pct > 0 else 0
 
-        # Enhanced logging: shows exact risk verification
         logger.info(
             "POSITION_SIZE balance=%.2f risk=%.2f sl_pct=%.4f "
-            "size=%.2f max_loss=%.2f | "
-            "SL=%.2f%% TP=%.2f%% R:R=%.1f:1 "
+            "notional=%.2f margin=%.2f leverage=%dx max_loss=%.2f | "
+            "SL=%.2f%% TP=%.2f%% R:R=%.1f:1 liq=$%.2f "
             "(ATR=%.4f, regime=%s, strat=%s, conf=%.0f%%)",
             balance, risk_amount, sl_pct * 100,
-            position_size, position_size * sl_pct,
-            sl_pct * 100, tp_pct * 100, risk_reward,
+            position_size, margin_required, leverage, position_size * sl_pct,
+            sl_pct * 100, tp_pct * 100, risk_reward, liquidation_price,
             atr, regime, strategy, confidence * 100,
         )
 
@@ -239,6 +275,9 @@ class AdaptiveParams:
             risk_reward=risk_reward,
             atr_value=atr,
             risk_amount=round(risk_amount, 2),
+            leverage=leverage,
+            margin_required=round(margin_required, 2),
+            liquidation_price=round(liquidation_price, 2),
         )
 
     def record_outcome(self, trade_result: dict):

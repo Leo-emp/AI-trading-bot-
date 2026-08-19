@@ -35,13 +35,15 @@ class OpenPosition:
     pair: str
     side: str            # "buy" or "sell"
     entry_price: float
-    quantity: float      # asset quantity
+    quantity: float      # asset quantity (based on NOTIONAL, not margin)
     stop_loss: float
     take_profit: float
     strategy: str
     opened_at: float     # time.time() for age tracking
     entry_fee: float     # fee paid on entry
     partial_taken: bool = False  # has 50% profit been taken at 1R?
+    leverage: float = 1.0       # futures leverage (1.0 = spot-like)
+    margin_locked: float = 0.0  # cash actually reserved (notional / leverage)
 
 
 class PaperTrader:
@@ -89,27 +91,23 @@ class PaperTrader:
     def get_equity(self, current_prices: dict = None) -> float:
         """P0.2: Mark-to-market account equity.
 
-        _balance is available cash only — opening a $20K position moves $20K
-        from cash to "reserved in position." That's not a loss.
+        With leverage: only margin was deducted from cash, so we add back
+        margin + unrealized P&L (not full notional).
 
-        equity = cash + sum(entry_notional + unrealized_pnl) for each position
-
-        This is what the protection system should use, not get_balance().
+        equity = cash + sum(margin_locked + unrealized_pnl) for each position
         """
         current_prices = current_prices or {}
         equity = self._balance
 
         for pos in self._positions:
-            # Use current price if available, otherwise entry price
             price = current_prices.get(pos.pair, pos.entry_price)
-            # The entry notional was deducted from cash when position opened
-            entry_notional = pos.entry_price * pos.quantity
-            # Calculate unrealized P&L
             if pos.side == "buy":
                 unrealized_pnl = (price - pos.entry_price) * pos.quantity
             else:
                 unrealized_pnl = (pos.entry_price - price) * pos.quantity
-            equity += entry_notional + unrealized_pnl
+            # margin_locked is what was deducted; add it back + P&L
+            locked = pos.margin_locked if pos.margin_locked > 0 else pos.entry_price * pos.quantity
+            equity += locked + unrealized_pnl
 
         return equity
 
@@ -126,8 +124,12 @@ class PaperTrader:
         return pnl
 
     def execute_signal(self, signal: StrategySignal, pair: str,
-                       position_size: float) -> Optional[Trade]:
+                       position_size: float,
+                       leverage: int = 1) -> Optional[Trade]:
         """Execute a simulated trade based on a strategy signal.
+
+        With futures leverage, only margin (notional / leverage) is deducted
+        from balance. The full notional determines quantity and P&L.
 
         Returns the Trade record if executed, or None if rejected.
         """
@@ -143,26 +145,28 @@ class PaperTrader:
             logger.info("Rejected: max positions (%d) reached", self._max_positions)
             return None
 
-        # Cap per-pair positions — allows scaling in but limits concentration
         pair_count = sum(1 for pos in self._positions if pos.pair == pair)
         if pair_count >= self._max_per_pair:
             logger.info("Rejected: already have %d/%d positions on %s",
                          pair_count, self._max_per_pair, pair)
             return None
 
-        if position_size > self._balance:
-            logger.info("Rejected: insufficient balance ($%.2f < $%.2f)", self._balance, position_size)
+        # With leverage: only margin is locked, not full notional
+        margin = position_size / leverage
+        entry_fee = position_size * self._fee_rate
+
+        if margin + entry_fee > self._balance:
+            logger.info("Rejected: insufficient margin ($%.2f needed, $%.2f available)",
+                       margin + entry_fee, self._balance)
             return None
 
         # --- Calculate entry ---
         entry_price = signal.entry_price
         quantity = position_size / entry_price
-        entry_fee = position_size * self._fee_rate
 
-        # Deduct position size + entry fee from balance
-        self._balance -= (position_size + entry_fee)
+        # Deduct MARGIN + fee from balance (not full notional)
+        self._balance -= (margin + entry_fee)
 
-        # Create open position
         pos = OpenPosition(
             pair=pair,
             side=signal.direction.lower(),
@@ -173,12 +177,16 @@ class PaperTrader:
             strategy=signal.strategy_name,
             opened_at=time.time(),
             entry_fee=entry_fee,
+            leverage=float(leverage),
+            margin_locked=margin,
         )
         self._positions.append(pos)
 
         logger.info(
-            "PAPER %s %s: %.8f @ $%.2f (SL: $%.2f, TP: $%.2f) [fee: $%.4f]",
+            "PAPER %s %s: %.8f @ $%.2f | notional=$%.0f margin=$%.0f %dx | "
+            "SL=$%.2f TP=$%.2f [fee=$%.4f]",
             signal.direction, pair, quantity, entry_price,
+            position_size, margin, leverage,
             signal.stop_loss, signal.take_profit, entry_fee,
         )
 
@@ -220,6 +228,31 @@ class PaperTrader:
 
             close_reason = None
             exit_price = price
+
+            # --- Liquidation check (leveraged positions) ---
+            # With isolated margin, if loss exceeds margin the exchange
+            # force-closes. SL should always trigger first, but this is
+            # the safety net for flash crashes that gap through SL.
+            if pos.leverage > 1.0:
+                maint_rate = 0.004
+                if pos.side == "buy":
+                    liq_price = pos.entry_price * (1 - (1 / pos.leverage) * (1 - maint_rate))
+                    if candle_low <= liq_price:
+                        close_reason = "liquidation"
+                        exit_price = liq_price
+                        logger.critical(
+                            "LIQUIDATED %s BUY | low=%.2f <= liq=%.2f | %dx leverage",
+                            pos.pair, candle_low, liq_price, int(pos.leverage),
+                        )
+                else:
+                    liq_price = pos.entry_price * (1 + (1 / pos.leverage) * (1 - maint_rate))
+                    if candle_high >= liq_price:
+                        close_reason = "liquidation"
+                        exit_price = liq_price
+                        logger.critical(
+                            "LIQUIDATED %s SELL | high=%.2f >= liq=%.2f | %dx leverage",
+                            pos.pair, candle_high, liq_price, int(pos.leverage),
+                        )
 
             # --- Partial profit-taking at 2R (lock in profit, let rest run) ---
             # Take 25% at 2R instead of 50% at 1R.
@@ -295,12 +328,7 @@ class PaperTrader:
         return closed_trades
 
     def _take_partial_profit(self, pos: OpenPosition, current_price: float) -> Optional[Trade]:
-        """Close 25% of position at 2R profit. Banks 0.5R guaranteed.
-
-        Old: 50% at 1R → capped upside, average win ~0.5R vs 1R loss
-        New: 25% at 2R → banks 0.5R, 75% rides for 3R-5R big winners
-        Keeps 75% of position for the trend continuation that makes real money.
-        """
+        """Close 25% of position at 2R profit. Banks 0.5R guaranteed."""
         partial_qty = pos.quantity * 0.25
         if partial_qty * current_price < 5.0:
             return None
@@ -316,13 +344,15 @@ class PaperTrader:
 
         net_pnl = gross_pnl - exit_fee - entry_fee_partial
 
-        # Return partial notional + profit to balance
-        entry_partial_notional = partial_qty * pos.entry_price
-        self._balance += entry_partial_notional + gross_pnl - exit_fee
+        # Return partial margin + profit (leverage-aware)
+        partial_margin = pos.margin_locked * 0.25 if pos.margin_locked > 0 else partial_qty * pos.entry_price
+        self._balance += partial_margin + gross_pnl - exit_fee
 
-        # Reduce position size (keep 75% running)
-        pos.quantity = pos.quantity - partial_qty
-        pos.entry_fee = pos.entry_fee * 0.75
+        # Reduce position (keep 75% running)
+        pos.quantity -= partial_qty
+        pos.entry_fee *= 0.75
+        if pos.margin_locked > 0:
+            pos.margin_locked *= 0.75
         pos.partial_taken = True
 
         self._total_trades += 1
@@ -340,10 +370,10 @@ class PaperTrader:
             strategy=pos.strategy,
             entry_price=pos.entry_price,
             exit_price=current_price,
-            quantity=half_qty,
-            pnl=net_pnl, fees=exit_fee + entry_fee_half,
+            quantity=partial_qty,
+            pnl=net_pnl, fees=exit_fee + entry_fee_partial,
             status="partial_close",
-            close_reason="partial_1r",
+            close_reason="partial_2r",
         )
         return trade
 
@@ -360,7 +390,12 @@ class PaperTrader:
 
     def _close_position(self, pos: OpenPosition, exit_price: float,
                          reason: str) -> Trade:
-        """Close a position and calculate P&L after fees."""
+        """Close a position and calculate P&L after fees.
+
+        With leverage: return margin + P&L (not full notional).
+        Isolated margin: balance_return can't go below 0 (you lose
+        at most your margin, never more).
+        """
         exit_notional = pos.quantity * exit_price
         exit_fee = exit_notional * self._fee_rate
         total_fees = pos.entry_fee + exit_fee
@@ -372,9 +407,12 @@ class PaperTrader:
 
         net_pnl = gross_pnl - total_fees
 
-        # Return notional + P&L to balance
-        entry_notional = pos.quantity * pos.entry_price
-        self._balance += entry_notional + gross_pnl - exit_fee
+        # Return margin + P&L to balance (isolated margin: floor at 0)
+        locked = pos.margin_locked if pos.margin_locked > 0 else pos.entry_price * pos.quantity
+        balance_return = locked + gross_pnl - exit_fee
+        if balance_return < 0:
+            balance_return = 0
+        self._balance += balance_return
 
         # Track stats
         self._total_trades += 1
@@ -416,6 +454,8 @@ class PaperTrader:
                         "strategy": p.strategy, "opened_at": p.opened_at,
                         "entry_fee": p.entry_fee,
                         "partial_taken": p.partial_taken,
+                        "leverage": p.leverage,
+                        "margin_locked": p.margin_locked,
                     }
                     for p in self._positions
                 ],
@@ -442,6 +482,11 @@ class PaperTrader:
             self._total_wins = state.get("total_wins", 0)
 
             for p in state.get("positions", []):
+                # Backward compat: old positions without leverage default to 1× (spot)
+                lev = p.get("leverage", 1.0)
+                margin = p.get("margin_locked", 0.0)
+                if margin <= 0:
+                    margin = p["entry_price"] * p["quantity"]
                 pos = OpenPosition(
                     pair=p["pair"], side=p["side"],
                     entry_price=p["entry_price"], quantity=p["quantity"],
@@ -449,6 +494,8 @@ class PaperTrader:
                     strategy=p["strategy"], opened_at=p["opened_at"],
                     entry_fee=p["entry_fee"],
                     partial_taken=p.get("partial_taken", False),
+                    leverage=lev,
+                    margin_locked=margin,
                 )
                 self._positions.append(pos)
 

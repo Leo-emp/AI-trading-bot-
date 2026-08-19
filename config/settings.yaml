@@ -86,6 +86,19 @@ protection:
   flash_crash_pct: 5.0
   max_api_errors: 3
 
+# Futures leverage — confidence-scaled leverage tiers
+# SL always set BEFORE liquidation price (2% buffer)
+# Isolated margin: each position can only lose its own margin
+futures:
+  enabled: true
+  margin_mode: "isolated"
+  leverage_tiers:
+    low: 3           # <70% confidence
+    medium: 5        # 70%+ confidence
+    high: 10         # 80%+ confidence (4/5 brains)
+    max: 20          # 95%+ confidence (5/5 brains)
+  liquidation_buffer_pct: 2.0
+
 # Scheduling
 schedule:
   gemini_interval_minutes: 15

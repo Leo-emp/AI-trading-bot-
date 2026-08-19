@@ -65,3 +65,4 @@ real_grid:
   max_bb_width_pct: 5.5      # reject grids when BB width > this (too volatile)
   exit_atr_multiplier: 1.0   # close grid when price exits range by N × ATR
   max_concurrent_grids: 3    # cap to prevent over-allocation of balance
+  max_grid_loss_pct: 40.0    # force-close grid if unrealized loss > 40% of reserved

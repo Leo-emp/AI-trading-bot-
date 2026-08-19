@@ -206,7 +206,10 @@ class TradingEngine:
                 exit_atr_multiplier=grid_cfg.get("exit_atr_multiplier", 1.0),
                 fee_rate=fee_rate,
             )
-            self._grid_executor = GridExecutor(fee_rate=fee_rate)
+            self._grid_executor = GridExecutor(
+                fee_rate=fee_rate,
+                max_loss_pct=grid_cfg.get("max_grid_loss_pct", 40.0),
+            )
             self._max_concurrent_grids = grid_cfg.get("max_concurrent_grids", 3)
             logger.info("Real grid engine initialized: %d levels, %.1f%% max exposure, max %d concurrent",
                        grid_cfg.get("num_levels", 10), grid_cfg.get("max_exposure_pct", 15.0),
@@ -483,7 +486,20 @@ class TradingEngine:
                         if len(trs) >= 14:
                             atr = sum(trs[-14:]) / 14
 
+                    # Check all exit conditions: ATR breakout, max loss, fully loaded
                     should_close, reason = self._grid_calculator.should_close_grid(current_price, grid, atr)
+
+                    if not should_close:
+                        force_close, force_reason = self._grid_executor.should_force_close(pair, current_price)
+                        if force_close:
+                            should_close = True
+                            reason = f"MAX LOSS: {force_reason}"
+
+                    if not should_close and self._grid_executor.is_fully_loaded(pair):
+                        if current_price <= grid.lower_bound:
+                            should_close = True
+                            reason = "fully loaded + price at/below lower bound"
+
                     if should_close:
                         balance_return, summary = self._grid_executor.deactivate_grid(pair, current_price)
                         self._trader._balance += balance_return
@@ -497,11 +513,13 @@ class TradingEngine:
                     else:
                         status = self._grid_executor.get_status(pair)
                         unrealized = self._grid_executor.get_unrealized_pnl(pair, current_price)
+                        loss_pct = self._grid_executor.get_loss_pct(pair, current_price)
                         logger.info(
                             "GRID STATUS | %s | holding=%d/%d | fills=%d | "
-                            "realized=$%.4f | unrealized=$%.4f | cash=$%.2f",
+                            "realized=$%.4f | unrealized=$%.4f | loss=%.1f%% | cash=$%.2f",
                             pair, status["holding"], status["levels"],
-                            status["fills"], status["pnl"], unrealized, status["grid_cash"],
+                            status["fills"], status["pnl"], unrealized,
+                            loss_pct, status["grid_cash"],
                         )
 
             except Exception as e:
@@ -537,7 +555,7 @@ class TradingEngine:
                 # Grid balance was deducted from trader._balance on activation.
                 # Add back: grid cash (unspent) + exposure (filled positions) + unrealized P&L.
                 if self._grid_executor:
-                    equity += self._grid_executor._grid_cash
+                    equity += self._grid_executor.total_grid_cash
                     equity += self._grid_executor.get_open_exposure()
                     for gp in self._grid_executor.active_pairs:
                         equity += self._grid_executor.get_unrealized_pnl(

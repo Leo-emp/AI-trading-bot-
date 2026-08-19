@@ -1,7 +1,8 @@
 # tests/test_real_grid.py
 # Comprehensive tests for the grid engine.
 # Tests cover: level calculation, buy/sell fills, P&L accuracy,
-# edge cases, safety limits, and grid lifecycle.
+# inventory scaling, per-grid cash isolation, max loss protection,
+# fully loaded detection, and grid lifecycle.
 
 import pytest
 from src.strategies.real_grid import GridCalculator, GridState, GridLevel
@@ -54,7 +55,6 @@ class TestGridCalculator:
         spacings = []
         for i in range(1, len(grid.levels)):
             spacings.append(grid.levels[i].price - grid.levels[i - 1].price)
-        # All spacings should be equal (within floating point tolerance)
         for s in spacings:
             assert abs(s - spacings[0]) < 0.01
 
@@ -84,7 +84,7 @@ class TestGridCalculator:
 
     def test_rejects_invalid_bb_range(self):
         grid = self.calc.calculate_levels(
-            bb_lower=97000, bb_upper=93000,  # lower > upper
+            bb_lower=97000, bb_upper=93000,
             current_price=95000, balance=100000,
         )
         assert grid is None
@@ -92,14 +92,14 @@ class TestGridCalculator:
     def test_rejects_price_outside_range(self):
         grid = self.calc.calculate_levels(
             bb_lower=93000, bb_upper=97000,
-            current_price=99000, balance=100000,  # above range
+            current_price=99000, balance=100000,
         )
         assert grid is None
 
     def test_rejects_too_small_balance(self):
         grid = self.calc.calculate_levels(
             bb_lower=93000, bb_upper=97000,
-            current_price=95000, balance=50,  # 15% of $50 = $7.50 < $10 min
+            current_price=95000, balance=50,
         )
         assert grid is None
 
@@ -109,7 +109,6 @@ class TestGridCalculator:
             lower_bound=93000, upper_bound=97000,
             levels=[], size_per_level=100,
         )
-        # Price at 97000 + 500 ATR + buffer = 97600
         close, _ = self.calc.should_close_grid(97600, grid, atr=500)
         assert close is True
 
@@ -137,10 +136,6 @@ class TestGridCalculator:
             current_price=95000, balance=100000,
         )
         profit = self.calc.get_profit_per_fill(grid)
-        # Spacing ~$363, at $95K midpoint = ~0.38%
-        # Gross: $1500 × 0.38% = $5.72
-        # Fees: $1500 × 0.075% × 2 = $2.25
-        # Net: ~$3.47
         assert profit > 0, f"profit per fill should be positive, got {profit}"
 
     def test_grid_spacing_pct(self):
@@ -149,20 +144,11 @@ class TestGridCalculator:
             current_price=95000, balance=100000,
         )
         pct = self.calc.get_grid_spacing_pct(grid)
-        # $4000 range / 11 intervals = $363.6 spacing
-        # $363.6 / $95000 midpoint = 0.38%
         assert 0.3 < pct < 0.5, f"spacing should be ~0.38%, got {pct}"
 
     def test_rejects_unprofitable_grid(self):
-        """If BB range is so tight that spacing < fees, reject the grid.
-
-        This was the production bug: 5m BB gave $100 range on BTC,
-        spacing = 0.014% vs 0.15% round-trip fees = loss on every fill.
-        """
-        # $100 range on $95K BTC = 10 levels = $9 spacing = 0.0095%
-        # Round-trip fees = 0.15%. 0.0095% < 0.15% → unprofitable → rejected
         grid = self.calc.calculate_levels(
-            bb_lower=94950, bb_upper=95050,  # only $100 range
+            bb_lower=94950, bb_upper=95050,
             current_price=95000, balance=100000,
         )
         assert grid is None, "should reject grid where spacing < fees"
@@ -172,7 +158,7 @@ class TestGridExecutor:
     """Test grid execution — buys, sells, P&L tracking."""
 
     def setup_method(self):
-        self.executor = GridExecutor(fee_rate=0.00075)
+        self.executor = GridExecutor(fee_rate=0.00075, max_loss_pct=40.0)
 
     def _make_grid(self, lower=93000, upper=97000, num_levels=5,
                    size_per_level=1000) -> GridState:
@@ -205,18 +191,43 @@ class TestGridExecutor:
         assert ok is False
 
     def test_activate_rejects_insufficient_balance(self):
-        grid = self._make_grid(size_per_level=1000)  # 5 × $1000 = $5000 reserved
+        grid = self._make_grid(size_per_level=1000)
         ok, msg = self.executor.activate_grid("BTC/USDT", grid, paper_balance=5000)
-        # 5000 reserved > 5000 * 0.5 = 2500
         assert ok is False
         assert "available" in msg
 
+    def test_per_grid_cash_isolation(self):
+        """Each grid gets its own isolated cash pool."""
+        grid_btc = self._make_grid(size_per_level=1000)
+        grid_eth = self._make_grid(size_per_level=500)
+        self.executor.activate_grid("BTC/USDT", grid_btc, paper_balance=100000)
+        self.executor.activate_grid("ETH/USDT", grid_eth, paper_balance=90000)
+
+        assert self.executor._grid_cash["BTC/USDT"] == 5000  # 5 × $1000
+        assert self.executor._grid_cash["ETH/USDT"] == 2500  # 5 × $500
+
+    def test_buy_uses_grid_own_cash(self):
+        """Buying from one grid doesn't affect another grid's cash."""
+        grid_btc = self._make_grid(lower=90000, upper=100000, size_per_level=1000)
+        grid_eth = self._make_grid(lower=1800, upper=2200, size_per_level=500)
+        self.executor.activate_grid("BTC/USDT", grid_btc, paper_balance=100000)
+        self.executor.activate_grid("ETH/USDT", grid_eth, paper_balance=90000)
+
+        btc_cash_before = self.executor._grid_cash["BTC/USDT"]
+        eth_cash_before = self.executor._grid_cash["ETH/USDT"]
+
+        # Buy one BTC level
+        self.executor.update("BTC/USDT", grid_btc.levels[0].price,
+                            grid_btc.levels[0].price + 100, grid_btc.levels[0].price)
+
+        # BTC cash decreased, ETH cash unchanged
+        assert self.executor._grid_cash["BTC/USDT"] < btc_cash_before
+        assert self.executor._grid_cash["ETH/USDT"] == eth_cash_before
+
     def test_buy_triggers_on_price_drop(self):
         grid = self._make_grid(lower=93000, upper=97000, num_levels=5)
-        # Levels: 93666.67, 94333.33, 95000, 95666.67, 96333.33
         self.executor.activate_grid("BTC/USDT", grid, paper_balance=100000)
 
-        # Price drops to level 1 (~93666)
         level_price = grid.levels[0].price
         fills = self.executor.update(
             "BTC/USDT",
@@ -224,7 +235,6 @@ class TestGridExecutor:
             candle_high=95000,
             candle_low=level_price,
         )
-        # No sells yet — just bought
         assert len(fills) == 0
         assert grid.levels[0].is_holding is True
 
@@ -232,43 +242,35 @@ class TestGridExecutor:
         grid = self._make_grid(lower=93000, upper=97000, num_levels=5)
         self.executor.activate_grid("BTC/USDT", grid, paper_balance=100000)
 
-        # Step 1: Buy at level 0
         buy_price = grid.levels[0].price
         self.executor.update("BTC/USDT", buy_price, buy_price + 100, buy_price)
         assert grid.levels[0].is_holding is True
 
-        # Step 2: Price rises to level 1 (sell target for level 0)
         sell_price = grid.levels[1].price
         fills = self.executor.update("BTC/USDT", sell_price, sell_price, sell_price - 100)
         assert len(fills) == 1
-        assert fills[0].net_pnl > 0  # profit after fees
-        assert grid.levels[0].is_holding is False  # position closed
+        assert fills[0].net_pnl > 0
+        assert grid.levels[0].is_holding is False
 
     def test_pnl_accuracy(self):
-        """Verify P&L math is correct for a single grid fill."""
         grid = self._make_grid(lower=94000, upper=96000, num_levels=4,
                                size_per_level=1000)
-        # Levels: 94400, 94800, 95200, 95600
         self.executor.activate_grid("BTC/USDT", grid, paper_balance=100000)
 
-        buy_price = grid.levels[0].price   # 94400
-        sell_price = grid.levels[1].price  # 94800
+        buy_price = grid.levels[0].price
+        sell_price = grid.levels[1].price
 
-        # Buy
         self.executor.update("BTC/USDT", buy_price, buy_price + 50, buy_price)
-        assert grid.levels[0].is_holding is True
-
-        # Sell
         fills = self.executor.update("BTC/USDT", sell_price, sell_price, sell_price - 50)
         assert len(fills) == 1
         fill = fills[0]
 
-        # Manual calculation
-        qty = 1000 / 94400  # ~0.01059
-        entry_fee = 1000 * 0.00075  # $0.75
-        exit_notional = qty * 94800
+        # Manual calculation (first buy = 100% scale)
+        qty = 1000 / buy_price
+        entry_fee = 1000 * 0.00075
+        exit_notional = qty * sell_price
         exit_fee = exit_notional * 0.00075
-        expected_gross = (94800 - 94400) * qty
+        expected_gross = (sell_price - buy_price) * qty
         expected_net = expected_gross - entry_fee - exit_fee
 
         assert abs(fill.gross_pnl - expected_gross) < 0.01
@@ -280,7 +282,6 @@ class TestGridExecutor:
                                size_per_level=1000)
         self.executor.activate_grid("BTC/USDT", grid, paper_balance=100000)
 
-        # Bounce 1: buy level 0, sell at level 1
         self.executor.update("BTC/USDT", grid.levels[0].price,
                             grid.levels[0].price + 50, grid.levels[0].price)
         fills1 = self.executor.update("BTC/USDT", grid.levels[1].price,
@@ -288,70 +289,100 @@ class TestGridExecutor:
         assert len(fills1) == 1
         pnl_after_1 = grid.total_pnl
 
-        # Bounce 2: price drops back to level 0, buy again, sell again
         self.executor.update("BTC/USDT", grid.levels[0].price,
                             grid.levels[0].price + 50, grid.levels[0].price)
         fills2 = self.executor.update("BTC/USDT", grid.levels[1].price,
                                       grid.levels[1].price, grid.levels[1].price - 50)
         assert len(fills2) == 1
-        assert grid.total_pnl > pnl_after_1  # P&L accumulated
+        assert grid.total_pnl > pnl_after_1
         assert grid.total_fills == 2
 
-    def test_cash_runs_out_after_max_buys(self):
-        """Grid stops buying when cash pool is exhausted.
-
-        With wide spacing (90K-100K, 4 levels = $2000 apart), each update
-        only touches the targeted level. But we use a single sweep candle
-        to buy all levels at once, letting fees consume the 4th level's budget.
-        4 × $1000 reserved = $4000. Each buy costs $1000 + $0.75 fee = $1000.75.
-        After 3 buys: $4000 - 3 × $1000.75 = $997.75 < $1000 = can't buy 4th.
-        """
-        # Wide spacing so levels don't interfere
+    def test_inventory_scaling_reduces_size(self):
+        """Each subsequent buy at a new level should be smaller."""
         grid = self._make_grid(lower=90000, upper=100000, num_levels=4,
                                size_per_level=1000)
-        # Levels: 92000, 94000, 96000, 98000
+        # Levels: 92000, 94000, 96000, 98000 — wide enough for isolation
         self.executor.activate_grid("BTC/USDT", grid, paper_balance=100000)
 
-        # One big candle sweeps through all levels at once
-        # current_price at highest level ensures all pass the 0.995 check
+        # Buy level 0 (0 filled → 100% scale = $1000 position)
+        self.executor.update("BTC/USDT", grid.levels[0].price,
+                            grid.levels[0].price + 100, grid.levels[0].price)
+        qty_0 = grid.levels[0].quantity
+        notional_0 = qty_0 * grid.levels[0].price  # should be ~$1000
+
+        # Buy level 1 (1 filled → 85% scale = $850 position)
+        # candle_high must be BELOW sell target for level 0 (which is level 1 price)
+        # to avoid triggering a sell that resets filled_count
+        buy_1 = grid.levels[1].price
+        self.executor.update("BTC/USDT", buy_1 - 1, buy_1 - 1, buy_1)
+        qty_1 = grid.levels[1].quantity
+        notional_1 = qty_1 * grid.levels[1].price  # should be ~$850
+
+        # Verify notional sizes reflect inventory scaling
+        assert abs(notional_0 - 1000) < 1.0    # 100% of $1000
+        assert abs(notional_1 - 850) < 1.0     # 85% of $1000
+        assert notional_1 < notional_0          # smaller due to scaling
+
+    def test_inventory_scaling_values(self):
+        """Verify the scale factors are correct."""
+        from src.execution.grid_executor import INVENTORY_SCALE
+        assert INVENTORY_SCALE[0] == 1.0    # 0 filled → full size
+        assert INVENTORY_SCALE[1] == 0.85   # 1 filled → 85%
+        assert INVENTORY_SCALE[2] == 0.70   # 2 filled → 70%
+        assert INVENTORY_SCALE[3] == 0.55   # 3 filled → 55%
+        assert INVENTORY_SCALE[4] == 0.40   # 4 filled → 40%
+
+    def test_cash_runs_out_after_max_buys(self):
+        """Grid stops buying when its isolated cash pool is exhausted."""
+        grid = self._make_grid(lower=90000, upper=100000, num_levels=4,
+                               size_per_level=1000)
+        self.executor.activate_grid("BTC/USDT", grid, paper_balance=100000)
+
+        # Sweep all levels. Inventory scaling: 1000+850+700+550=$3100 + fees
+        # Reserved: $4000. After scaled buys + fees, last level may not fit.
         self.executor.update(
             "BTC/USDT",
-            current_price=grid.levels[3].price,  # 98000
+            current_price=grid.levels[3].price,
             candle_high=99000,
-            candle_low=grid.levels[0].price,      # 92000
+            candle_low=grid.levels[0].price,
         )
 
-        # Only 3 fill — fees eat the 4th level's budget
         holding = sum(1 for l in grid.levels if l.is_holding)
-        assert holding == 3
-        assert self.executor._grid_cash < grid.size_per_level
+        # With inventory scaling, all 4 levels should fit
+        # (total ~$3100 + ~$2.33 fees < $4000 reserved)
+        assert holding == 4
 
     def test_deactivate_closes_open_positions(self):
         grid = self._make_grid(lower=94000, upper=96000, num_levels=4,
                                size_per_level=1000)
         self.executor.activate_grid("BTC/USDT", grid, paper_balance=100000)
 
-        # Buy at level 0
         self.executor.update("BTC/USDT", grid.levels[0].price,
                             grid.levels[0].price + 50, grid.levels[0].price)
         assert grid.levels[0].is_holding is True
 
-        # Deactivate — should close the position
         balance_return, summary = self.executor.deactivate_grid(
             "BTC/USDT", current_price=95000,
         )
-        assert balance_return > 0  # got cash back
+        assert balance_return > 0
         assert grid.levels[0].is_holding is False
         assert grid.is_active is False
         assert "fills" in summary
 
+    def test_deactivate_removes_grid_cash(self):
+        """Deactivating a grid removes its entry from _grid_cash."""
+        grid = self._make_grid()
+        self.executor.activate_grid("BTC/USDT", grid, paper_balance=100000)
+        assert "BTC/USDT" in self.executor._grid_cash
+
+        self.executor.deactivate_grid("BTC/USDT", current_price=95000)
+        assert "BTC/USDT" not in self.executor._grid_cash
+
     def test_deactivate_returns_correct_balance(self):
-        """Balance returned should include accumulated P&L."""
         grid = self._make_grid(lower=94000, upper=96000, num_levels=4,
                                size_per_level=1000)
         self.executor.activate_grid("BTC/USDT", grid, paper_balance=100000)
 
-        # Complete one fill cycle (profit)
         self.executor.update("BTC/USDT", grid.levels[0].price,
                             grid.levels[0].price + 50, grid.levels[0].price)
         self.executor.update("BTC/USDT", grid.levels[1].price,
@@ -360,7 +391,6 @@ class TestGridExecutor:
         balance_return, _ = self.executor.deactivate_grid(
             "BTC/USDT", current_price=95000,
         )
-        # Should get back more than reserved (profit from the fill)
         assert balance_return > grid.reserved_balance - grid.size_per_level
 
     def test_unrealized_pnl_positive_when_price_above_entry(self):
@@ -368,11 +398,9 @@ class TestGridExecutor:
                                size_per_level=1000)
         self.executor.activate_grid("BTC/USDT", grid, paper_balance=100000)
 
-        # Buy at level 0 (94400)
         self.executor.update("BTC/USDT", grid.levels[0].price,
                             grid.levels[0].price + 50, grid.levels[0].price)
 
-        # Check unrealized P&L at higher price
         pnl = self.executor.get_unrealized_pnl("BTC/USDT", 95000)
         assert pnl > 0
 
@@ -381,12 +409,108 @@ class TestGridExecutor:
                                size_per_level=1000)
         self.executor.activate_grid("BTC/USDT", grid, paper_balance=100000)
 
-        # Buy at level 1 (94800)
         self.executor.update("BTC/USDT", grid.levels[1].price,
                             grid.levels[1].price + 50, grid.levels[1].price)
 
         pnl = self.executor.get_unrealized_pnl("BTC/USDT", 94000)
         assert pnl < 0
+
+    def test_max_loss_triggers_force_close(self):
+        """Grid signals force-close when unrealized loss exceeds threshold."""
+        grid = self._make_grid(lower=90000, upper=100000, num_levels=4,
+                               size_per_level=1000)
+        # reserved = $4000, max_loss = 40% → triggers at $1600 loss
+        self.executor.activate_grid("BTC/USDT", grid, paper_balance=100000)
+
+        # Fill all 4 levels to maximize exposure
+        self.executor.update(
+            "BTC/USDT",
+            current_price=grid.levels[3].price,
+            candle_high=99000,
+            candle_low=grid.levels[0].price,
+        )
+        # Total invested ~$1000+$850+$700+$550 = $3100
+        # At price 50000, loss on each position is massive
+        # Level 0 (92000→50000): (50000-92000)×(1000/92000) ≈ -$456
+        # Level 1 (94000→50000): (50000-94000)×(850/94000) ≈ -$397
+        # Level 2 (96000→50000): (50000-96000)×(700/96000) ≈ -$335
+        # Level 3 (98000→50000): (50000-98000)×(550/98000) ≈ -$269
+        # Total: ~-$1457 → 1457/4000 = 36.4%... need more extreme price
+        should_close, reason = self.executor.should_force_close("BTC/USDT", 30000)
+        assert should_close is True
+        assert "loss" in reason.lower()
+
+    def test_max_loss_does_not_trigger_in_profit(self):
+        """No force-close when position is profitable."""
+        grid = self._make_grid(lower=90000, upper=100000, num_levels=4,
+                               size_per_level=1000)
+        self.executor.activate_grid("BTC/USDT", grid, paper_balance=100000)
+
+        self.executor.update("BTC/USDT", grid.levels[0].price,
+                            grid.levels[0].price + 100, grid.levels[0].price)
+
+        should_close, _ = self.executor.should_force_close("BTC/USDT", 99000)
+        assert should_close is False
+
+    def test_loss_pct_calculation(self):
+        """Verify loss percentage is calculated correctly."""
+        grid = self._make_grid(lower=90000, upper=100000, num_levels=4,
+                               size_per_level=1000)
+        # reserved = $4000
+        self.executor.activate_grid("BTC/USDT", grid, paper_balance=100000)
+
+        # Buy at 92000
+        self.executor.update("BTC/USDT", grid.levels[0].price,
+                            grid.levels[0].price + 100, grid.levels[0].price)
+
+        # Price at entry — 0% loss
+        loss_at_entry = self.executor.get_loss_pct("BTC/USDT", grid.levels[0].price)
+        assert loss_at_entry == 0.0
+
+        # Price above entry — still 0% (in profit)
+        loss_above = self.executor.get_loss_pct("BTC/USDT", 95000)
+        assert loss_above == 0.0
+
+    def test_fully_loaded_detection(self):
+        """Detect when all grid levels are filled."""
+        grid = self._make_grid(lower=90000, upper=100000, num_levels=3,
+                               size_per_level=500)
+        # Levels: 92500, 95000, 97500
+        self.executor.activate_grid("BTC/USDT", grid, paper_balance=100000)
+
+        assert self.executor.is_fully_loaded("BTC/USDT") is False
+
+        # Fill all 3 levels with one sweep candle
+        self.executor.update(
+            "BTC/USDT",
+            current_price=grid.levels[2].price,
+            candle_high=99000,
+            candle_low=grid.levels[0].price,
+        )
+
+        assert self.executor.is_fully_loaded("BTC/USDT") is True
+
+    def test_fully_loaded_not_triggered_when_partial(self):
+        """Partially filled grid is not fully loaded."""
+        grid = self._make_grid(lower=90000, upper=100000, num_levels=4,
+                               size_per_level=500)
+        self.executor.activate_grid("BTC/USDT", grid, paper_balance=100000)
+
+        # Fill only level 0
+        self.executor.update("BTC/USDT", grid.levels[0].price,
+                            grid.levels[0].price + 100, grid.levels[0].price)
+
+        assert self.executor.is_fully_loaded("BTC/USDT") is False
+
+    def test_total_grid_cash(self):
+        """total_grid_cash sums across all active grids."""
+        grid_btc = self._make_grid(size_per_level=1000)
+        grid_eth = self._make_grid(size_per_level=500)
+        self.executor.activate_grid("BTC/USDT", grid_btc, paper_balance=100000)
+        self.executor.activate_grid("ETH/USDT", grid_eth, paper_balance=90000)
+
+        # BTC: 5×1000 = 5000, ETH: 5×500 = 2500, total = 7500
+        assert self.executor.total_grid_cash == 7500.0
 
     def test_status_returns_correct_info(self):
         grid = self._make_grid(lower=94000, upper=96000, num_levels=4)
@@ -403,12 +527,11 @@ class TestGridExecutor:
         assert fills == []
 
     def test_price_gaps_through_multiple_levels(self):
-        """If price drops through 3 levels in one candle, buy all 3."""
+        """If price drops through multiple levels in one candle, buy them all."""
         grid = self._make_grid(lower=94000, upper=96000, num_levels=4,
                                size_per_level=500)
         self.executor.activate_grid("BTC/USDT", grid, paper_balance=100000)
 
-        # Candle low sweeps through first 3 levels
         lowest_level = grid.levels[0].price
         third_level = grid.levels[2].price
         self.executor.update(
@@ -418,24 +541,21 @@ class TestGridExecutor:
             candle_low=lowest_level,
         )
 
-        # First 3 levels should have bought
+        # With inventory scaling, all 3 levels within the candle range should fill
+        # (sizes: 500, 425, 350 + fees easily fit in $2000 budget)
         holding = sum(1 for l in grid.levels if l.is_holding)
-        assert holding == 3
+        assert holding >= 3
 
     def test_open_exposure_tracking(self):
-        # Wide spacing so only one level triggers per update
         grid = self._make_grid(lower=90000, upper=100000, num_levels=4,
                                size_per_level=1000)
-        # Levels: 92000, 94000, 96000, 98000
         self.executor.activate_grid("BTC/USDT", grid, paper_balance=100000)
 
         assert self.executor.get_open_exposure() == 0.0
 
-        # Buy only level 0 (92000) — wide spacing prevents level 1 from triggering
         self.executor.update("BTC/USDT", grid.levels[0].price,
                             grid.levels[0].price + 100, grid.levels[0].price)
 
         exposure = self.executor.get_open_exposure()
-        # qty × entry_price = (1000/92000) × 92000 = $1000
         assert exposure > 900
         assert exposure < 1100

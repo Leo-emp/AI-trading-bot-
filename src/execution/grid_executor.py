@@ -1,14 +1,14 @@
 # src/execution/grid_executor.py
 # Grid Executor — manages the grid lifecycle independently.
 #
-# This is separate from the directional paper trader.
-# The grid executor:
-# 1. Reserves balance from the paper trader on activation
-# 2. Manages its own positions internally (no max_positions conflict)
-# 3. Returns balance + P&L on deactivation
-#
-# Each grid fill (buy at level N, sell at level N+1) is a micro-trade.
-# Fees are simulated identically to the paper trader.
+# RISK MANAGEMENT:
+# - Per-grid cash isolation: each grid's capital is separate
+# - Inventory scaling: position size shrinks as more levels fill
+#   (reduces directional exposure when most vulnerable)
+# - Max loss protection: force-closes grid if unrealized loss
+#   exceeds threshold (before ATR breakout)
+# - Fully loaded detection: signals when all levels are filled
+#   and price is below the range (maximum pain, no upside)
 
 import logging
 import time
@@ -18,6 +18,11 @@ from typing import Optional
 from src.strategies.real_grid import GridState, GridLevel, GridCalculator
 
 logger = logging.getLogger(__name__)
+
+# Scale position size down as more levels fill.
+# At 0 filled: 100% size. At 4 filled: 40% size.
+# Reduces total directional exposure when we're most vulnerable.
+INVENTORY_SCALE = [1.0, 0.85, 0.70, 0.55, 0.40]
 
 
 @dataclass
@@ -40,15 +45,17 @@ class GridExecutor:
     Reserves balance on activation, returns it on deactivation.
     """
 
-    def __init__(self, fee_rate: float = 0.00075):
+    def __init__(self, fee_rate: float = 0.00075,
+                 max_loss_pct: float = 40.0):
         self._fee_rate = fee_rate
+        self._max_loss_pct = max_loss_pct
         self._grids: dict[str, GridState] = {}  # pair -> active grid
         self._fill_history: list[GridFill] = []
         self._calculator = GridCalculator(fee_rate=fee_rate)
-        # Balance reserved from paper trader (returned on deactivation)
+        # Balance reserved from paper trader (total across all grids)
         self._reserved_balance: float = 0.0
-        # Available balance within the grid allocation
-        self._grid_cash: float = 0.0
+        # Per-grid cash pools — each grid's capital is isolated
+        self._grid_cash: dict[str, float] = {}
 
     @property
     def active_pairs(self) -> list[str]:
@@ -61,6 +68,11 @@ class GridExecutor:
     @property
     def total_fills(self) -> int:
         return sum(g.total_fills for g in self._grids.values())
+
+    @property
+    def total_grid_cash(self) -> float:
+        """Total unspent cash across all active grids."""
+        return sum(self._grid_cash.get(p, 0.0) for p in self.active_pairs)
 
     def get_grid(self, pair: str) -> Optional[GridState]:
         return self._grids.get(pair)
@@ -93,7 +105,8 @@ class GridExecutor:
         grid_state.is_active = True
         self._grids[pair] = grid_state
         self._reserved_balance += grid_state.reserved_balance
-        self._grid_cash += grid_state.reserved_balance
+        # Each grid gets its own isolated cash pool
+        self._grid_cash[pair] = grid_state.reserved_balance
 
         logger.info(
             "GRID ACTIVATED | %s | range $%.2f-$%.2f | %d levels | "
@@ -111,46 +124,57 @@ class GridExecutor:
         if grid is None or not grid.is_active:
             return []
 
+        pair_cash = self._grid_cash.get(pair, 0.0)
+        filled_count = sum(1 for l in grid.levels if l.is_holding)
         fills = []
 
         for i, level in enumerate(grid.levels):
             if level.is_holding:
-                # We have a position at this level — check if we should sell
-                # Sell when price rises to the NEXT level above
+                # Check if we should sell at the next level above
                 sell_target = self._get_sell_target(grid, i)
                 if sell_target is not None and candle_high >= sell_target:
-                    fill = self._execute_sell(grid, level, sell_target)
+                    fill = self._execute_sell(grid, pair, level, sell_target)
                     if fill:
                         fills.append(fill)
+                        filled_count -= 1
 
             else:
-                # No position at this level — check if we should buy
-                # Buy when price drops to this level (or through it)
+                # Check if we should buy at this level
                 if candle_low <= level.price and current_price >= level.price * 0.995:
-                    # Price touched this level — buy
-                    if self._grid_cash >= grid.size_per_level:
-                        self._execute_buy(grid, level)
+                    # Inventory-scaled position size
+                    scale = self._get_inventory_scale(filled_count)
+                    adjusted_size = grid.size_per_level * scale
+                    pair_cash = self._grid_cash.get(pair, 0.0)
+
+                    if pair_cash >= adjusted_size:
+                        self._execute_buy(grid, pair, level, adjusted_size)
+                        filled_count += 1
 
         return fills
 
-    def _get_sell_target(self, grid: GridState, level_index: int) -> Optional[float]:
-        """Get the sell target for a position at level_index.
+    def _get_inventory_scale(self, filled_count: int) -> float:
+        """Scale factor based on how many levels are already filled."""
+        if filled_count < len(INVENTORY_SCALE):
+            return INVENTORY_SCALE[filled_count]
+        return INVENTORY_SCALE[-1]
 
-        Sell target = the price of the next level above.
+    def _get_sell_target(self, grid: GridState, level_index: int) -> Optional[float]:
+        """Sell target = the price of the next level above.
         If this is the highest level, sell at upper_bound.
         """
         if level_index + 1 < len(grid.levels):
             return grid.levels[level_index + 1].price
         return grid.upper_bound
 
-    def _execute_buy(self, grid: GridState, level: GridLevel):
-        """Execute a grid buy at this level."""
+    def _execute_buy(self, grid: GridState, pair: str,
+                     level: GridLevel, position_size: float):
+        """Execute a grid buy at this level with inventory-scaled size."""
         buy_price = level.price
-        quantity = grid.size_per_level / buy_price
-        fee = grid.size_per_level * self._fee_rate
+        quantity = position_size / buy_price
+        fee = position_size * self._fee_rate
 
-        # Deduct from grid cash
-        self._grid_cash -= (grid.size_per_level + fee)
+        # Deduct from this grid's isolated cash pool
+        self._grid_cash[pair] -= (position_size + fee)
 
         level.is_holding = True
         level.entry_price = buy_price
@@ -158,11 +182,13 @@ class GridExecutor:
         level.entry_fee = fee
 
         logger.info(
-            "GRID BUY | %s @ $%.2f | qty %.6f | fee $%.4f | grid_cash $%.2f",
-            grid.pair, buy_price, quantity, fee, self._grid_cash,
+            "GRID BUY | %s @ $%.2f | qty %.6f | size $%.0f | fee $%.4f | grid_cash $%.2f",
+            grid.pair, buy_price, quantity, position_size, fee,
+            self._grid_cash[pair],
         )
 
-    def _execute_sell(self, grid: GridState, level: GridLevel,
+    def _execute_sell(self, grid: GridState, pair: str,
+                      level: GridLevel,
                       sell_price: float) -> Optional[GridFill]:
         """Execute a grid sell — complete one buy+sell cycle."""
         if not level.is_holding or level.quantity <= 0:
@@ -173,8 +199,8 @@ class GridExecutor:
         gross_pnl = (sell_price - level.entry_price) * level.quantity
         net_pnl = gross_pnl - level.entry_fee - exit_fee
 
-        # Return notional + profit to grid cash
-        self._grid_cash += exit_notional - exit_fee
+        # Return notional + profit to this grid's cash pool
+        self._grid_cash[pair] += exit_notional - exit_fee
 
         fill = GridFill(
             pair=grid.pair,
@@ -227,7 +253,7 @@ class GridExecutor:
                 gross = (current_price - level.entry_price) * level.quantity
                 net = gross - level.entry_fee - exit_fee
                 close_pnl += net
-                self._grid_cash += exit_notional - exit_fee
+                self._grid_cash[pair] += exit_notional - exit_fee
 
                 level.is_holding = False
                 level.quantity = 0.0
@@ -240,11 +266,9 @@ class GridExecutor:
         grid.total_pnl += close_pnl
         grid.is_active = False
 
-        # Calculate what to return to paper trader
-        # = remaining grid cash (original allocation + accumulated P&L)
-        balance_return = self._grid_cash
+        # Return this grid's remaining cash to paper trader
+        balance_return = self._grid_cash.pop(pair, 0.0)
         self._reserved_balance -= grid.reserved_balance
-        self._grid_cash = max(0.0, self._grid_cash - grid.reserved_balance)
 
         summary = (
             f"grid closed: {grid.total_fills} fills, "
@@ -266,6 +290,30 @@ class GridExecutor:
                 pnl += (current_price - level.entry_price) * level.quantity
         return pnl
 
+    def get_loss_pct(self, pair: str, current_price: float) -> float:
+        """Unrealized loss as % of reserved balance. 0 if in profit."""
+        grid = self._grids.get(pair)
+        if not grid or not grid.is_active or grid.reserved_balance <= 0:
+            return 0.0
+        unrealized = self.get_unrealized_pnl(pair, current_price)
+        if unrealized >= 0:
+            return 0.0
+        return abs(unrealized) / grid.reserved_balance * 100
+
+    def should_force_close(self, pair: str, current_price: float) -> tuple[bool, str]:
+        """Check if grid should be force-closed due to excessive loss."""
+        loss_pct = self.get_loss_pct(pair, current_price)
+        if loss_pct >= self._max_loss_pct:
+            return True, f"unrealized loss {loss_pct:.1f}% >= {self._max_loss_pct:.0f}% max"
+        return False, ""
+
+    def is_fully_loaded(self, pair: str) -> bool:
+        """True if all grid levels are filled (maximum directional exposure)."""
+        grid = self._grids.get(pair)
+        if not grid or not grid.is_active:
+            return False
+        return all(l.is_holding for l in grid.levels)
+
     def get_status(self, pair: str) -> dict:
         """Get grid status for logging/Telegram."""
         grid = self._grids.get(pair)
@@ -281,5 +329,5 @@ class GridExecutor:
             "holding": holding,
             "fills": grid.total_fills,
             "pnl": round(grid.total_pnl, 4),
-            "grid_cash": round(self._grid_cash, 2),
+            "grid_cash": round(self._grid_cash.get(pair, 0.0), 2),
         }

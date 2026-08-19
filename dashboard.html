@@ -1,0 +1,982 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Trading Bot — Live Dashboard</title>
+    <style>
+        /* ============================================================
+           DARK TRADING TERMINAL THEME
+           Colors: GitHub dark palette + trading green/red
+           ============================================================ */
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        :root {
+            --bg-primary: #0d1117;
+            --bg-surface: #161b22;
+            --bg-elevated: #1c2333;
+            --border: #30363d;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --text-muted: #484f58;
+            --green: #3fb950;
+            --green-bg: rgba(63, 185, 80, 0.1);
+            --red: #f85149;
+            --red-bg: rgba(248, 81, 73, 0.1);
+            --blue: #58a6ff;
+            --purple: #bc8cff;
+            --yellow: #d29922;
+            --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+            --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        }
+
+        body {
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            font-family: var(--font-sans);
+            font-size: 14px;
+            line-height: 1.5;
+            min-height: 100vh;
+        }
+
+        /* --- HEADER / TOP BAR --- */
+        .header {
+            background: var(--bg-surface);
+            border-bottom: 1px solid var(--border);
+            padding: 12px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+        .header-title {
+            font-size: 18px;
+            font-weight: 700;
+            color: var(--purple);
+            letter-spacing: -0.5px;
+        }
+        .connection-dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background: var(--red);
+            display: inline-block;
+        }
+        .connection-dot.connected { background: var(--green); }
+
+        /* --- STATS BAR --- */
+        .stats-bar {
+            display: flex;
+            gap: 12px;
+            padding: 16px 24px;
+            overflow-x: auto;
+            border-bottom: 1px solid var(--border);
+            background: var(--bg-surface);
+        }
+        .stat-card {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px 20px;
+            min-width: 140px;
+            flex-shrink: 0;
+        }
+        .stat-label {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-secondary);
+            margin-bottom: 4px;
+        }
+        .stat-value {
+            font-size: 22px;
+            font-weight: 700;
+            font-family: var(--font-mono);
+        }
+        .stat-sub {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-top: 2px;
+        }
+
+        /* --- MAIN LAYOUT --- */
+        .main {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0;
+            min-height: calc(100vh - 140px);
+        }
+
+        /* --- SECTION PANELS --- */
+        .panel {
+            border-right: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+        }
+        .panel-header {
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border);
+            font-size: 13px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-secondary);
+            background: var(--bg-surface);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .panel-body {
+            padding: 12px 16px;
+            flex: 1;
+            overflow-y: auto;
+            max-height: 400px;
+        }
+
+        /* --- MARKETS GRID --- */
+        .markets-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+            gap: 8px;
+            padding: 12px 16px;
+        }
+        .market-card {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 10px 12px;
+            cursor: default;
+            transition: border-color 0.2s;
+        }
+        .market-card:hover { border-color: var(--purple); }
+        .market-pair {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            margin-bottom: 4px;
+        }
+        .market-price {
+            font-size: 18px;
+            font-weight: 700;
+            font-family: var(--font-mono);
+        }
+        .market-change {
+            font-size: 13px;
+            font-weight: 600;
+            font-family: var(--font-mono);
+            margin-top: 2px;
+        }
+        .market-meta {
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-top: 4px;
+        }
+        .market-sparkline {
+            margin-top: 6px;
+            height: 24px;
+        }
+
+        /* --- TABLES --- */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+        th {
+            text-align: left;
+            padding: 8px 10px;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-muted);
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+            background: var(--bg-primary);
+        }
+        td {
+            padding: 6px 10px;
+            border-bottom: 1px solid var(--border);
+            font-family: var(--font-mono);
+            font-size: 12px;
+            white-space: nowrap;
+        }
+        tr:hover td { background: var(--bg-elevated); }
+
+        /* --- P&L COLORING --- */
+        .pnl-positive { color: var(--green); }
+        .pnl-negative { color: var(--red); }
+        .side-buy { color: var(--green); }
+        .side-sell { color: var(--red); }
+
+        /* --- EQUITY CHART --- */
+        .chart-container {
+            padding: 16px;
+            height: 300px;
+            position: relative;
+        }
+        #equityChart {
+            width: 100%;
+            height: 100%;
+        }
+
+        /* --- LOG VIEWER --- */
+        .log-viewer {
+            background: #0a0c10;
+            font-family: var(--font-mono);
+            font-size: 11px;
+            line-height: 1.6;
+            padding: 12px;
+            overflow-y: auto;
+            max-height: 400px;
+            flex: 1;
+        }
+        .log-line { white-space: pre-wrap; word-break: break-all; }
+        .log-info { color: var(--text-secondary); }
+        .log-trade { color: var(--green); }
+        .log-loss { color: var(--red); }
+        .log-gate { color: var(--yellow); }
+        .log-error { color: var(--red); font-weight: bold; }
+        .log-exit { color: var(--blue); }
+
+        /* --- FULL WIDTH PANELS --- */
+        .panel-full {
+            grid-column: 1 / -1;
+        }
+
+        /* --- RESPONSIVE --- */
+        @media (max-width: 900px) {
+            .main { grid-template-columns: 1fr; }
+            .stats-bar { flex-wrap: wrap; }
+            .markets-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+        }
+
+        /* --- BADGE --- */
+        .badge {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        .badge-green { background: var(--green-bg); color: var(--green); }
+        .badge-red { background: var(--red-bg); color: var(--red); }
+
+        /* --- SCROLLBAR --- */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: var(--bg-primary); }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+        /* --- NO DATA STATE --- */
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
+            color: var(--text-muted);
+        }
+    </style>
+</head>
+<body>
+
+    <!-- ============ HEADER ============ -->
+    <div class="header">
+        <div class="header-left">
+            <span class="header-title">AI Trading Bot</span>
+            <span class="connection-dot" id="botDot" title="Bot connection"></span>
+            <span style="font-size:11px;color:var(--text-muted)" id="botStatus">Connecting...</span>
+        </div>
+        <div style="font-size:12px;color:var(--text-muted)" id="lastUpdate">—</div>
+    </div>
+
+    <!-- ============ STATS BAR ============ -->
+    <div class="stats-bar">
+        <div class="stat-card">
+            <div class="stat-label">Equity</div>
+            <div class="stat-value" id="statEquity">—</div>
+            <div class="stat-sub" id="statEquitySub"></div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Cash</div>
+            <div class="stat-value" id="statCash">—</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Total P&L</div>
+            <div class="stat-value" id="statPnl">—</div>
+            <div class="stat-sub" id="statPnlPct"></div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Win Rate</div>
+            <div class="stat-value" id="statWinRate">—</div>
+            <div class="stat-sub" id="statTrades"></div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Open Positions</div>
+            <div class="stat-value" id="statPositions">0</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Unrealized P&L</div>
+            <div class="stat-value" id="statUnrealized">—</div>
+        </div>
+    </div>
+
+    <!-- ============ MAIN GRID ============ -->
+    <div class="main">
+
+        <!-- LIVE MARKETS -->
+        <div class="panel panel-full">
+            <div class="panel-header">
+                Live Markets — Binance
+                <span style="font-size:11px;color:var(--text-muted)">
+                    <span class="connection-dot" id="binanceDot"></span>
+                    <span id="binanceStatus">Connecting...</span>
+                </span>
+            </div>
+            <div class="markets-grid" id="marketsGrid">
+                <!-- Populated by JS -->
+            </div>
+        </div>
+
+        <!-- OPEN POSITIONS -->
+        <div class="panel">
+            <div class="panel-header">Open Positions</div>
+            <div class="panel-body" id="positionsBody">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Pair</th>
+                            <th>Side</th>
+                            <th>Entry</th>
+                            <th>Current</th>
+                            <th>P&L</th>
+                            <th>Leverage</th>
+                            <th>SL</th>
+                            <th>TP</th>
+                            <th>Age</th>
+                        </tr>
+                    </thead>
+                    <tbody id="positionsTable">
+                        <tr><td colspan="9" class="empty-state">No open positions</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- TRADE HISTORY -->
+        <div class="panel">
+            <div class="panel-header">
+                Trade History
+                <span style="font-size:11px;color:var(--text-muted)" id="tradeCount"></span>
+            </div>
+            <div class="panel-body" id="tradesBody">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Pair</th>
+                            <th>Side</th>
+                            <th>Entry</th>
+                            <th>Exit</th>
+                            <th>P&L</th>
+                            <th>Fees</th>
+                            <th>Strategy</th>
+                            <th>Reason</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tradesTable">
+                        <tr><td colspan="9" class="empty-state">No trades yet</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- EQUITY CURVE -->
+        <div class="panel panel-full">
+            <div class="panel-header">Equity Curve (72h)</div>
+            <div class="chart-container">
+                <canvas id="equityChart"></canvas>
+            </div>
+        </div>
+
+        <!-- LIVE LOGS -->
+        <div class="panel panel-full">
+            <div class="panel-header">
+                Live Logs
+                <span style="font-size:11px">
+                    <label style="color:var(--text-muted);cursor:pointer">
+                        <input type="checkbox" id="autoScroll" checked
+                               style="margin-right:4px"> Auto-scroll
+                    </label>
+                </span>
+            </div>
+            <div class="log-viewer" id="logViewer"></div>
+        </div>
+
+    </div>
+
+    <!-- ============================================================
+         JAVASCRIPT — All dashboard logic
+         ============================================================ -->
+    <script>
+    (function() {
+        'use strict';
+
+        // ---- CONFIG ----
+        // The 12 pairs the bot trades (order matches config/settings.yaml)
+        const PAIRS = [
+            'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT',
+            'DOGE/USDT', 'BNB/USDT', 'ADA/USDT', 'AVAX/USDT',
+            'POL/USDT', 'LINK/USDT', 'DOT/USDT', 'NEAR/USDT'
+        ];
+
+        // Convert BTC/USDT → btcusdt for Binance WebSocket
+        function toBinanceSymbol(pair) {
+            return pair.replace('/', '').toLowerCase();
+        }
+
+        // Server WebSocket URL (auto-detect protocol and host)
+        const WS_PROTOCOL = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const WS_BASE = WS_PROTOCOL + '//' + location.host;
+
+        // ---- STATE ----
+        // Live prices from Binance (updated every ~1 second)
+        const marketData = {};
+        // Price history for sparklines (last 60 data points per pair)
+        const priceHistory = {};
+        // Bot data from server (updated every 5 seconds)
+        let botData = null;
+
+        // ---- DOM REFERENCES ----
+        const $ = (id) => document.getElementById(id);
+
+        // ---- FORMAT HELPERS ----
+        // Format dollar amount with commas
+        function formatUsd(n, decimals = 2) {
+            if (n == null || isNaN(n)) return '—';
+            return '$' + Number(n).toLocaleString('en-US', {
+                minimumFractionDigits: decimals,
+                maximumFractionDigits: decimals
+            });
+        }
+
+        // Format a price — auto-detect decimal places from magnitude
+        function formatPrice(price) {
+            if (price == null) return '—';
+            const p = Number(price);
+            if (p >= 1000) return p.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            if (p >= 1) return p.toFixed(4);
+            return p.toFixed(6);
+        }
+
+        // Format percentage with sign
+        function formatPct(pct) {
+            if (pct == null) return '—';
+            const sign = pct >= 0 ? '+' : '';
+            return sign + Number(pct).toFixed(2) + '%';
+        }
+
+        // Format time ago from unix timestamp
+        function formatAge(openedAt) {
+            if (!openedAt) return '—';
+            const seconds = (Date.now() / 1000) - openedAt;
+            const hours = Math.floor(seconds / 3600);
+            const mins = Math.floor((seconds % 3600) / 60);
+            if (hours > 0) return hours + 'h ' + mins + 'm';
+            return mins + 'm';
+        }
+
+        // Format ISO timestamp to short time
+        function formatTime(iso) {
+            if (!iso) return '—';
+            try {
+                const d = new Date(iso);
+                return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })
+                     + ' ' + d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+            } catch { return iso; }
+        }
+
+        // ============================================================
+        // 1. BINANCE WEBSOCKET — Live market prices
+        // ============================================================
+        function connectBinance() {
+            // Build combined stream URL for all 12 pairs
+            const streams = PAIRS.map(p => toBinanceSymbol(p) + '@ticker').join('/');
+            const url = 'wss://stream.binance.com:9443/stream?streams=' + streams;
+
+            const ws = new WebSocket(url);
+
+            ws.onopen = () => {
+                $('binanceDot').classList.add('connected');
+                $('binanceStatus').textContent = 'Live';
+            };
+
+            ws.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+                const d = msg.data;
+                if (!d || !d.s) return;
+
+                // Map Binance symbol back to our pair format
+                const symbol = d.s; // e.g. "BTCUSDT"
+                const pair = PAIRS.find(p => toBinanceSymbol(p) === symbol.toLowerCase());
+                if (!pair) return;
+
+                // Store latest market data
+                marketData[pair] = {
+                    price: parseFloat(d.c),         // current price
+                    change24h: parseFloat(d.P),      // 24h change %
+                    high24h: parseFloat(d.h),        // 24h high
+                    low24h: parseFloat(d.l),         // 24h low
+                    volume: parseFloat(d.q),          // 24h quote volume (USDT)
+                    lastUpdate: Date.now()
+                };
+
+                // Track price history for sparklines (keep last 60 points)
+                if (!priceHistory[pair]) priceHistory[pair] = [];
+                priceHistory[pair].push(parseFloat(d.c));
+                if (priceHistory[pair].length > 60) priceHistory[pair].shift();
+
+                // Update the specific market card immediately
+                updateMarketCard(pair);
+            };
+
+            ws.onclose = () => {
+                $('binanceDot').classList.remove('connected');
+                $('binanceStatus').textContent = 'Reconnecting...';
+                // Auto-reconnect after 3 seconds
+                setTimeout(connectBinance, 3000);
+            };
+
+            ws.onerror = () => {
+                $('binanceStatus').textContent = 'Error';
+            };
+        }
+
+        // ============================================================
+        // 2. BOT WEBSOCKET — Positions, trades, equity
+        // ============================================================
+        function connectBot() {
+            const ws = new WebSocket(WS_BASE + '/ws/bot');
+
+            ws.onopen = () => {
+                $('botDot').classList.add('connected');
+                $('botStatus').textContent = 'Connected';
+            };
+
+            ws.onmessage = (event) => {
+                botData = JSON.parse(event.data);
+                updateStatsBar();
+                updatePositions();
+                updateTrades();
+                updateEquityChart();
+                $('lastUpdate').textContent = 'Updated ' + new Date().toLocaleTimeString();
+            };
+
+            ws.onclose = () => {
+                $('botDot').classList.remove('connected');
+                $('botStatus').textContent = 'Reconnecting...';
+                setTimeout(connectBot, 3000);
+            };
+
+            ws.onerror = () => {
+                $('botStatus').textContent = 'Error';
+            };
+        }
+
+        // ============================================================
+        // 3. LOG WEBSOCKET — Live log streaming
+        // ============================================================
+        function connectLogs() {
+            const ws = new WebSocket(WS_BASE + '/ws/logs');
+            const viewer = $('logViewer');
+
+            ws.onmessage = (event) => {
+                const line = event.data;
+                const div = document.createElement('div');
+                div.className = 'log-line ' + classifyLogLine(line);
+                div.textContent = line;
+                viewer.appendChild(div);
+
+                // Keep max 500 lines in DOM
+                while (viewer.children.length > 500) {
+                    viewer.removeChild(viewer.firstChild);
+                }
+
+                // Auto-scroll if enabled
+                if ($('autoScroll').checked) {
+                    viewer.scrollTop = viewer.scrollHeight;
+                }
+            };
+
+            ws.onclose = () => {
+                setTimeout(connectLogs, 3000);
+            };
+        }
+
+        // Classify log lines for color coding
+        function classifyLogLine(line) {
+            if (line.includes('ERROR') || line.includes('CRITICAL')) return 'log-error';
+            if (line.includes('GATE APPROVED') || line.includes('OPENED')) return 'log-trade';
+            if (line.includes('Gate rejected') || line.includes('filter blocked') || line.includes('Skipping')) return 'log-gate';
+            if (line.includes('stop') || line.includes('CLOSED') || line.includes('phase')) return 'log-exit';
+            if (line.includes('pnl') && line.includes('-')) return 'log-loss';
+            return 'log-info';
+        }
+
+        // ============================================================
+        // 4. UI UPDATE FUNCTIONS
+        // ============================================================
+
+        // --- Build market cards on page load ---
+        function initMarketCards() {
+            const grid = $('marketsGrid');
+            grid.innerHTML = '';
+            PAIRS.forEach(pair => {
+                const card = document.createElement('div');
+                card.className = 'market-card';
+                card.id = 'market-' + toBinanceSymbol(pair);
+                card.innerHTML = `
+                    <div class="market-pair">${pair}</div>
+                    <div class="market-price" id="price-${toBinanceSymbol(pair)}">—</div>
+                    <div class="market-change" id="change-${toBinanceSymbol(pair)}">—</div>
+                    <div class="market-meta" id="meta-${toBinanceSymbol(pair)}">—</div>
+                    <canvas class="market-sparkline" id="spark-${toBinanceSymbol(pair)}" width="140" height="24"></canvas>
+                `;
+                grid.appendChild(card);
+            });
+        }
+
+        // --- Update a single market card with latest Binance data ---
+        function updateMarketCard(pair) {
+            const d = marketData[pair];
+            if (!d) return;
+            const sym = toBinanceSymbol(pair);
+            const isUp = d.change24h >= 0;
+
+            // Price
+            const priceEl = $('price-' + sym);
+            if (priceEl) priceEl.textContent = formatPrice(d.price);
+
+            // 24h change
+            const changeEl = $('change-' + sym);
+            if (changeEl) {
+                changeEl.textContent = formatPct(d.change24h);
+                changeEl.style.color = isUp ? 'var(--green)' : 'var(--red)';
+            }
+
+            // Volume & range
+            const metaEl = $('meta-' + sym);
+            if (metaEl) {
+                const vol = d.volume >= 1e9 ? (d.volume / 1e9).toFixed(1) + 'B'
+                          : d.volume >= 1e6 ? (d.volume / 1e6).toFixed(1) + 'M'
+                          : (d.volume / 1e3).toFixed(0) + 'K';
+                metaEl.textContent = 'Vol $' + vol + ' | H ' + formatPrice(d.high24h) + ' L ' + formatPrice(d.low24h);
+            }
+
+            // Sparkline
+            drawSparkline(sym, isUp);
+
+            // Card border color based on direction
+            const card = $('market-' + sym);
+            if (card) {
+                card.style.borderColor = isUp ? 'rgba(63,185,80,0.3)' : 'rgba(248,81,73,0.3)';
+            }
+        }
+
+        // --- Draw a mini sparkline chart ---
+        function drawSparkline(sym, isUp) {
+            const canvas = $('spark-' + sym);
+            if (!canvas) return;
+            const pair = PAIRS.find(p => toBinanceSymbol(p) === sym);
+            const data = priceHistory[pair];
+            if (!data || data.length < 2) return;
+
+            const ctx = canvas.getContext('2d');
+            const w = canvas.width;
+            const h = canvas.height;
+            ctx.clearRect(0, 0, w, h);
+
+            const min = Math.min(...data);
+            const max = Math.max(...data);
+            const range = max - min || 1;
+
+            ctx.beginPath();
+            ctx.strokeStyle = isUp ? '#3fb950' : '#f85149';
+            ctx.lineWidth = 1.5;
+
+            data.forEach((price, i) => {
+                const x = (i / (data.length - 1)) * w;
+                const y = h - ((price - min) / range) * (h - 4) - 2;
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+        }
+
+        // --- Update stats bar ---
+        function updateStatsBar() {
+            if (!botData) return;
+
+            const initial = botData.initial_balance || 100000;
+            const cash = botData.balance || 0;
+
+            // Calculate equity: cash + sum of margin locked in positions
+            let totalMargin = 0;
+            let unrealizedPnl = 0;
+            const positions = botData.positions || [];
+
+            positions.forEach(pos => {
+                totalMargin += (pos.margin_locked || 0);
+                // Calculate unrealized P&L using live Binance prices
+                const pair = pos.pair;
+                const livePrice = marketData[pair] ? marketData[pair].price : null;
+                if (livePrice && pos.entry_price && pos.quantity) {
+                    const direction = pos.side === 'buy' ? 1 : -1;
+                    unrealizedPnl += direction * (livePrice - pos.entry_price) * pos.quantity;
+                }
+            });
+
+            const equity = cash + totalMargin + unrealizedPnl;
+            const totalPnl = equity - initial;
+            const pnlPct = (totalPnl / initial) * 100;
+
+            // Update DOM
+            $('statEquity').textContent = formatUsd(equity, 0);
+            $('statEquity').className = 'stat-value ' + (equity >= initial ? 'pnl-positive' : 'pnl-negative');
+
+            $('statCash').textContent = formatUsd(cash, 0);
+
+            $('statPnl').textContent = (totalPnl >= 0 ? '+' : '') + formatUsd(totalPnl, 0);
+            $('statPnl').className = 'stat-value ' + (totalPnl >= 0 ? 'pnl-positive' : 'pnl-negative');
+            $('statPnlPct').textContent = formatPct(pnlPct);
+
+            $('statWinRate').textContent = botData.win_rate + '%';
+            $('statTrades').textContent = botData.total_wins + 'W / ' + (botData.total_trades - botData.total_wins) + 'L of ' + botData.total_trades;
+
+            $('statPositions').textContent = positions.length;
+
+            $('statUnrealized').textContent = (unrealizedPnl >= 0 ? '+' : '') + formatUsd(unrealizedPnl, 0);
+            $('statUnrealized').className = 'stat-value ' + (unrealizedPnl >= 0 ? 'pnl-positive' : 'pnl-negative');
+        }
+
+        // --- Update open positions table ---
+        function updatePositions() {
+            if (!botData) return;
+            const positions = botData.positions || [];
+            const tbody = $('positionsTable');
+
+            if (positions.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No open positions</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = positions.map(pos => {
+                const pair = pos.pair;
+                const livePrice = marketData[pair] ? marketData[pair].price : null;
+                const currentPrice = livePrice || pos.entry_price;
+                const direction = pos.side === 'buy' ? 1 : -1;
+                const pnl = direction * (currentPrice - pos.entry_price) * (pos.quantity || 0);
+                const pnlClass = pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
+                const sideClass = pos.side === 'buy' ? 'side-buy' : 'side-sell';
+
+                return `<tr>
+                    <td>${pair}</td>
+                    <td class="${sideClass}">${pos.side.toUpperCase()}</td>
+                    <td>${formatPrice(pos.entry_price)}</td>
+                    <td>${formatPrice(currentPrice)}</td>
+                    <td class="${pnlClass}">${pnl >= 0 ? '+' : ''}${formatUsd(pnl)}</td>
+                    <td>${pos.leverage || 1}x</td>
+                    <td>${formatPrice(pos.stop_loss)}</td>
+                    <td>${formatPrice(pos.take_profit)}</td>
+                    <td>${formatAge(pos.opened_at)}</td>
+                </tr>`;
+            }).join('');
+        }
+
+        // --- Update trade history table ---
+        function updateTrades() {
+            if (!botData) return;
+            const trades = botData.recent_trades || [];
+            const tbody = $('tradesTable');
+            $('tradeCount').textContent = trades.length + ' recent';
+
+            if (trades.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No trades yet</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = trades.map(t => {
+                const pnl = t.pnl || 0;
+                const pnlClass = pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
+                const sideClass = t.side === 'buy' ? 'side-buy' : 'side-sell';
+
+                return `<tr>
+                    <td>${formatTime(t.timestamp)}</td>
+                    <td>${t.pair || '—'}</td>
+                    <td class="${sideClass}">${(t.side || '—').toUpperCase()}</td>
+                    <td>${formatPrice(t.entry_price)}</td>
+                    <td>${formatPrice(t.exit_price)}</td>
+                    <td class="${pnlClass}">${pnl >= 0 ? '+' : ''}${formatUsd(pnl)}</td>
+                    <td style="color:var(--text-muted)">${formatUsd(t.fees)}</td>
+                    <td>${t.strategy || '—'}</td>
+                    <td>${(t.close_reason || t.status || '—')}</td>
+                </tr>`;
+            }).join('');
+        }
+
+        // --- Draw equity curve chart ---
+        function updateEquityChart() {
+            if (!botData) return;
+            const snapshots = botData.snapshots || [];
+            const canvas = $('equityChart');
+            if (!canvas) return;
+
+            const ctx = canvas.getContext('2d');
+            // Set canvas resolution to match display size
+            const rect = canvas.parentElement.getBoundingClientRect();
+            canvas.width = rect.width - 32;
+            canvas.height = rect.height - 32;
+            const w = canvas.width;
+            const h = canvas.height;
+
+            ctx.clearRect(0, 0, w, h);
+
+            if (snapshots.length < 2) {
+                ctx.fillStyle = '#484f58';
+                ctx.font = '14px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('Waiting for portfolio snapshots...', w / 2, h / 2);
+                return;
+            }
+
+            // Extract balance values
+            const values = snapshots.map(s => s.total_balance);
+            const initial = botData.initial_balance || values[0];
+            const min = Math.min(...values, initial) * 0.999;
+            const max = Math.max(...values, initial) * 1.001;
+            const range = max - min || 1;
+
+            // Padding
+            const px = 60; // left padding for labels
+            const py = 20; // top/bottom padding
+            const chartW = w - px - 20;
+            const chartH = h - py * 2;
+
+            // Draw grid lines
+            ctx.strokeStyle = '#1e2436';
+            ctx.lineWidth = 1;
+            for (let i = 0; i <= 4; i++) {
+                const y = py + (chartH / 4) * i;
+                ctx.beginPath();
+                ctx.moveTo(px, y);
+                ctx.lineTo(w - 20, y);
+                ctx.stroke();
+
+                // Labels
+                const val = max - (range / 4) * i;
+                ctx.fillStyle = '#484f58';
+                ctx.font = '11px monospace';
+                ctx.textAlign = 'right';
+                ctx.fillText(formatUsd(val, 0), px - 8, y + 4);
+            }
+
+            // Draw initial balance reference line
+            const initialY = py + ((max - initial) / range) * chartH;
+            ctx.strokeStyle = '#30363d';
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            ctx.moveTo(px, initialY);
+            ctx.lineTo(w - 20, initialY);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.fillStyle = '#484f58';
+            ctx.textAlign = 'left';
+            ctx.fillText('Initial: ' + formatUsd(initial, 0), px + 4, initialY - 6);
+
+            // Draw equity line
+            const lastValue = values[values.length - 1];
+            const isProfit = lastValue >= initial;
+            ctx.strokeStyle = isProfit ? '#3fb950' : '#f85149';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+
+            values.forEach((val, i) => {
+                const x = px + (i / (values.length - 1)) * chartW;
+                const y = py + ((max - val) / range) * chartH;
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+
+            // Fill area under curve
+            const gradient = ctx.createLinearGradient(0, py, 0, py + chartH);
+            if (isProfit) {
+                gradient.addColorStop(0, 'rgba(63, 185, 80, 0.15)');
+                gradient.addColorStop(1, 'rgba(63, 185, 80, 0)');
+            } else {
+                gradient.addColorStop(0, 'rgba(248, 81, 73, 0.15)');
+                gradient.addColorStop(1, 'rgba(248, 81, 73, 0)');
+            }
+
+            ctx.lineTo(px + chartW, py + chartH);
+            ctx.lineTo(px, py + chartH);
+            ctx.closePath();
+            ctx.fillStyle = gradient;
+            ctx.fill();
+
+            // Draw latest value dot
+            const lastX = px + chartW;
+            const lastY = py + ((max - lastValue) / range) * chartH;
+            ctx.beginPath();
+            ctx.arc(lastX, lastY, 4, 0, Math.PI * 2);
+            ctx.fillStyle = isProfit ? '#3fb950' : '#f85149';
+            ctx.fill();
+
+            // Latest value label
+            ctx.fillStyle = '#e6edf3';
+            ctx.font = 'bold 12px monospace';
+            ctx.textAlign = 'right';
+            ctx.fillText(formatUsd(lastValue, 0), lastX - 10, lastY - 10);
+
+            // Time labels along bottom
+            ctx.fillStyle = '#484f58';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            [0, Math.floor(snapshots.length / 2), snapshots.length - 1].forEach(idx => {
+                if (idx >= snapshots.length) return;
+                const x = px + (idx / (snapshots.length - 1)) * chartW;
+                ctx.fillText(formatTime(snapshots[idx].timestamp), x, h - 4);
+            });
+        }
+
+        // ============================================================
+        // 5. PERIODIC UI REFRESH
+        // ============================================================
+        // Refresh positions P&L with live Binance prices every second
+        // (even between 5-second bot data updates)
+        setInterval(() => {
+            if (botData) {
+                updateStatsBar();
+                updatePositions();
+            }
+        }, 1000);
+
+        // ============================================================
+        // 6. INIT
+        // ============================================================
+        initMarketCards();
+        connectBinance();
+        connectBot();
+        connectLogs();
+
+    })();
+    </script>
+
+</body>
+</html>

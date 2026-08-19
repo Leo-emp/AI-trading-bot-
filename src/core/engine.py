@@ -867,12 +867,14 @@ class TradingEngine:
                            if gate_decision.reasons else "no reason")
                 return
 
-            # Require at least one PRIMARY brain (strategy or gemini_ai)
-            # Order book + multi_timeframe alone are support signals, not entries
-            primary_brains = {"strategy", "gemini_ai"}
+            # Require at least one PRIMARY brain to have voted.
+            # Strategy, gemini_ai, AND order_book all read real market data —
+            # any of them can anchor a trade. Only multi_timeframe alone
+            # (which is just trend confirmation) needs backup from the others.
+            primary_brains = {"strategy", "gemini_ai", "order_book"}
             has_primary = any(name in brain_signals for name in primary_brains)
             if not has_primary:
-                logger.info("Skipping %s: no primary brain (strategy/gemini) voted", pair)
+                logger.info("Skipping %s: no primary brain voted", pair)
                 return
 
             # --- Step 6b: Trade Quality Filter ---

@@ -108,9 +108,18 @@ class MultiTimeframeBrain:
         return {"direction": "HOLD", "score": 0}
 
     def _combine_signals(self, signals: dict) -> dict:
-        """Combine signals from all timeframes using weighted voting."""
+        """Combine signals from all timeframes using weighted voting.
+
+        Confidence reflects STRENGTH of signals, not just agreement.
+        A score of 3 (minimum to signal) = 0.60 confidence.
+        A score of 5 (all indicators aligned) = 1.00 confidence.
+        This prevents MTF from always returning 1.00 and inflating the
+        gate's average confidence — which would make weak setups look strong.
+        """
         buy_weight = 0.0
         sell_weight = 0.0
+        total_score = 0
+        active_signals = 0
         reasons = []
 
         for tf, signal in signals.items():
@@ -119,30 +128,39 @@ class MultiTimeframeBrain:
 
             if direction == "BUY":
                 buy_weight += weight
-                reasons.append(f"{tf}: BUY")
+                total_score += signal.get("score", 3)
+                active_signals += 1
+                reasons.append(f"{tf}: BUY({signal.get('score', 0)})")
             elif direction == "SELL":
                 sell_weight += weight
-                reasons.append(f"{tf}: SELL")
+                total_score += signal.get("score", 3)
+                active_signals += 1
+                reasons.append(f"{tf}: SELL({signal.get('score', 0)})")
             else:
                 reasons.append(f"{tf}: HOLD")
 
-        # All timeframes must lean the same way
         total_weight = sum(self._weights.values())
-        # Need at least 70% weighted agreement
         threshold = total_weight * 0.7
 
+        # Strength-based confidence: avg score across agreeing timeframes
+        # Score range: 3-5 → maps to 0.60-1.00
+        if active_signals > 0:
+            avg_score = total_score / active_signals
+            strength_conf = 0.60 + (avg_score - 3) * 0.20
+            strength_conf = max(0.50, min(1.0, strength_conf))
+        else:
+            strength_conf = 0.0
+
         if buy_weight >= threshold:
-            confidence = buy_weight / total_weight
             return {
                 "direction": "BUY",
-                "confidence": round(confidence, 2),
+                "confidence": round(strength_conf, 2),
                 "reason": f"multi-TF aligned BUY ({', '.join(reasons)})",
             }
         elif sell_weight >= threshold:
-            confidence = sell_weight / total_weight
             return {
                 "direction": "SELL",
-                "confidence": round(confidence, 2),
+                "confidence": round(strength_conf, 2),
                 "reason": f"multi-TF aligned SELL ({', '.join(reasons)})",
             }
         else:

@@ -20,9 +20,9 @@ from src.strategies.real_grid import GridState, GridLevel, GridCalculator
 logger = logging.getLogger(__name__)
 
 # Scale position size down as more levels fill.
-# At 0 filled: 100% size. At 4 filled: 40% size.
+# At 0 filled: 100% size. At 9 filled: 25% size.
 # Reduces total directional exposure when we're most vulnerable.
-INVENTORY_SCALE = [1.0, 0.85, 0.70, 0.55, 0.40]
+INVENTORY_SCALE = [1.0, 0.90, 0.80, 0.70, 0.60, 0.50, 0.42, 0.35, 0.30, 0.25]
 
 
 @dataclass

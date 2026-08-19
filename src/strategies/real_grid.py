@@ -225,7 +225,7 @@ class GridCalculator:
         return False, ""
 
     def is_grid_idle(self, grid: GridState,
-                     idle_hours: float = 8.0) -> tuple[bool, str]:
+                     idle_hours: float = 4.0) -> tuple[bool, str]:
         """Check if the grid has been active too long with zero fills."""
         if not grid.is_active or grid.total_fills > 0:
             return False, ""

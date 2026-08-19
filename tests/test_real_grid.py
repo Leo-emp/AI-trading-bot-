@@ -343,27 +343,28 @@ class TestGridExecutor:
         qty_0 = grid.levels[0].quantity
         notional_0 = qty_0 * grid.levels[0].price  # should be ~$1000
 
-        # Buy level 1 (1 filled → 85% scale = $850 position)
+        # Buy level 1 (1 filled → 90% scale = $900 position)
         # candle_high must be BELOW sell target for level 0 (which is level 1 price)
         # to avoid triggering a sell that resets filled_count
         buy_1 = grid.levels[1].price
         self.executor.update("BTC/USDT", buy_1 - 1, buy_1 - 1, buy_1)
         qty_1 = grid.levels[1].quantity
-        notional_1 = qty_1 * grid.levels[1].price  # should be ~$850
+        notional_1 = qty_1 * grid.levels[1].price  # should be ~$900
 
         # Verify notional sizes reflect inventory scaling
         assert abs(notional_0 - 1000) < 1.0    # 100% of $1000
-        assert abs(notional_1 - 850) < 1.0     # 85% of $1000
+        assert abs(notional_1 - 900) < 1.0     # 90% of $1000
         assert notional_1 < notional_0          # smaller due to scaling
 
     def test_inventory_scaling_values(self):
         """Verify the scale factors are correct."""
         from src.execution.grid_executor import INVENTORY_SCALE
         assert INVENTORY_SCALE[0] == 1.0    # 0 filled → full size
-        assert INVENTORY_SCALE[1] == 0.85   # 1 filled → 85%
-        assert INVENTORY_SCALE[2] == 0.70   # 2 filled → 70%
-        assert INVENTORY_SCALE[3] == 0.55   # 3 filled → 55%
-        assert INVENTORY_SCALE[4] == 0.40   # 4 filled → 40%
+        assert INVENTORY_SCALE[1] == 0.90   # 1 filled → 90%
+        assert INVENTORY_SCALE[2] == 0.80   # 2 filled → 80%
+        assert INVENTORY_SCALE[3] == 0.70   # 3 filled → 70%
+        assert INVENTORY_SCALE[4] == 0.60   # 4 filled → 60%
+        assert len(INVENTORY_SCALE) >= 10   # covers up to 10 levels
 
     def test_cash_runs_out_after_max_buys(self):
         """Grid stops buying when its isolated cash pool is exhausted."""
@@ -659,7 +660,7 @@ class TestGridExecutor:
             lower_bound=93000, upper_bound=97000,
             levels=[], size_per_level=1000, is_active=True,
             total_fills=0,
-            activated_at=_time.time() - 3600,  # 1 hour ago
+            activated_at=_time.time() - 3600,  # 1 hour ago (< 4h timeout)
         )
         idle, _ = calc.is_grid_idle(grid)
         assert idle is False

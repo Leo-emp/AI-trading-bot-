@@ -31,7 +31,7 @@ class TradeFilter:
     """
 
     def __init__(self,
-                 min_confidence: float = 0.55,
+                 min_confidence: float = 0.50,
                  max_spread_pct: float = 0.25,
                  cooldown_minutes: int = 2,
                  max_correlated_positions: int = 5,

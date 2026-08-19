@@ -15,9 +15,9 @@
 smart_scalp:
   enabled: true
   adx_min: 25              # regime gate: ADX must be > 25 (strong trend)
-  stop_loss_pct: 0.6       # 0.6% stop loss
-  take_profit_pct: 1.5     # 1.5% take profit (R:R = 2.5:1)
-  cooldown_candles: 14     # 1h 10min between trades
+  stop_loss_pct: 0.6       # 0.6% (overridden by ATR-based adaptive params)
+  take_profit_pct: 1.5     # 1.5% (overridden by ATR-based adaptive params)
+  cooldown_candles: 8      # 40 min — trend filter handles quality control
   volume_min: 1.5          # volume must be 1.5x average for confirmation
 
 # Strategy 2: Volatility Squeeze (BB Squeeze Breakout)
@@ -26,21 +26,20 @@ smart_scalp:
 grid:
   enabled: true
   squeeze_ratio: 0.85      # BB width must have been 15% below SMA (compressed)
-  stop_loss_pct: 0.5       # 0.5% stop loss
-  take_profit_pct: 1.5     # 1.5% take profit (R:R = 3:1)
-  cooldown_candles: 18     # 1.5 hours between trades
+  stop_loss_pct: 0.5       # 0.5% (overridden by ATR-based adaptive params)
+  take_profit_pct: 1.5     # 1.5% (overridden by ATR-based adaptive params)
+  cooldown_candles: 10     # 50 min — was 18, filters now do quality control
   volume_min: 1.2          # volume must be 1.2x average
 
 # Strategy 3: Trend Momentum (EMA/MACD/ADX)
 # Rides established trends with EMA crossover + multiple confirmations
 # ADX > 20 = moderate trend (academic research threshold for momentum)
-# 25 was too strict — filtered out valid setups in transitioning markets
 momentum:
   enabled: true
   adx_min: 20              # regime gate: ADX > 20 (momentum research standard)
-  stop_loss_pct: 0.5       # 0.5% stop loss (tight — cut losers fast)
-  take_profit_pct: 2.0     # 2.0% take profit (R:R = 4:1, momentum carries)
-  cooldown_candles: 10     # 50 min between trades
+  stop_loss_pct: 0.5       # 0.5% (overridden by ATR-based adaptive params)
+  take_profit_pct: 2.0     # 2.0% (overridden by ATR-based adaptive params)
+  cooldown_candles: 6      # 30 min — momentum setups repeat fast in trends
 
 # Strategy 4: Trend Pullback (enters trends during temporary dips/bounces)
 # Different from Momentum (which enters on crossover/strength):
@@ -49,6 +48,6 @@ momentum:
 mean_reversion:
   enabled: true
   adx_min: 20              # regime gate: ADX > 20 (trend present)
-  stop_loss_pct: 0.6       # 0.6% stop loss
-  take_profit_pct: 1.5     # 1.5% take profit (R:R = 2.5:1)
-  cooldown_candles: 12     # 1 hour between trades
+  stop_loss_pct: 0.6       # 0.6% (overridden by ATR-based adaptive params)
+  take_profit_pct: 1.5     # 1.5% (overridden by ATR-based adaptive params)
+  cooldown_candles: 8      # 40 min — pullbacks happen frequently in trends

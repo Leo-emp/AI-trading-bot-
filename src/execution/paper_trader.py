@@ -221,20 +221,21 @@ class PaperTrader:
             close_reason = None
             exit_price = price
 
-            # --- Partial profit-taking at 1R (PROVEN: raises win count) ---
-            # When price reaches 1R profit (distance = SL distance), close 50%.
-            # This locks in a guaranteed win on half the position.
+            # --- Partial profit-taking at 2R (lock in profit, let rest run) ---
+            # Take 25% at 2R instead of 50% at 1R.
+            # Old: 50% at 1R capped upside → average win 0.5R vs 1R loss = negative EV
+            # New: 25% at 2R → guaranteed 0.5R banked, 75% rides for 3R-5R moves
             if not pos.partial_taken:
                 sl_distance = abs(pos.entry_price - pos.stop_loss)
                 if pos.side == "buy":
-                    target_1r = pos.entry_price + sl_distance
-                    if price >= target_1r:
+                    target_2r = pos.entry_price + sl_distance * 2.0
+                    if price >= target_2r:
                         partial_trade = self._take_partial_profit(pos, price)
                         if partial_trade:
                             closed_trades.append(partial_trade)
                 else:
-                    target_1r = pos.entry_price - sl_distance
-                    if price <= target_1r:
+                    target_2r = pos.entry_price - sl_distance * 2.0
+                    if price <= target_2r:
                         partial_trade = self._take_partial_profit(pos, price)
                         if partial_trade:
                             closed_trades.append(partial_trade)
@@ -294,35 +295,34 @@ class PaperTrader:
         return closed_trades
 
     def _take_partial_profit(self, pos: OpenPosition, current_price: float) -> Optional[Trade]:
-        """Close 50% of position at 1R profit. Locks in a guaranteed win.
+        """Close 25% of position at 2R profit. Banks 0.5R guaranteed.
 
-        The remaining 50% continues to ride with trailing stop toward full TP.
-        This mathematically increases win count because any trade reaching 1R
-        now counts as a win (for the closed half).
+        Old: 50% at 1R → capped upside, average win ~0.5R vs 1R loss
+        New: 25% at 2R → banks 0.5R, 75% rides for 3R-5R big winners
+        Keeps 75% of position for the trend continuation that makes real money.
         """
-        half_qty = pos.quantity * 0.5
-        if half_qty * current_price < 5.0:  # skip if too small
+        partial_qty = pos.quantity * 0.25
+        if partial_qty * current_price < 5.0:
             return None
 
-        # Calculate P&L on the closed half
-        half_notional = half_qty * current_price
-        exit_fee = half_notional * self._fee_rate
-        entry_fee_half = pos.entry_fee * 0.5
+        partial_notional = partial_qty * current_price
+        exit_fee = partial_notional * self._fee_rate
+        entry_fee_partial = pos.entry_fee * 0.25
 
         if pos.side == "buy":
-            gross_pnl = (current_price - pos.entry_price) * half_qty
+            gross_pnl = (current_price - pos.entry_price) * partial_qty
         else:
-            gross_pnl = (pos.entry_price - current_price) * half_qty
+            gross_pnl = (pos.entry_price - current_price) * partial_qty
 
-        net_pnl = gross_pnl - exit_fee - entry_fee_half
+        net_pnl = gross_pnl - exit_fee - entry_fee_partial
 
-        # Return half the notional + profit to balance
-        entry_half_notional = half_qty * pos.entry_price
-        self._balance += entry_half_notional + gross_pnl - exit_fee
+        # Return partial notional + profit to balance
+        entry_partial_notional = partial_qty * pos.entry_price
+        self._balance += entry_partial_notional + gross_pnl - exit_fee
 
-        # Reduce position size (keep other half running)
-        pos.quantity = pos.quantity - half_qty
-        pos.entry_fee = pos.entry_fee * 0.5
+        # Reduce position size (keep 75% running)
+        pos.quantity = pos.quantity - partial_qty
+        pos.entry_fee = pos.entry_fee * 0.75
         pos.partial_taken = True
 
         self._total_trades += 1
@@ -330,7 +330,7 @@ class PaperTrader:
             self._total_wins += 1
 
         logger.info(
-            "PARTIAL TAKE 50%% %s %s @ $%.2f | P&L: $%.2f [1R hit] | Remaining: %.4f units",
+            "PARTIAL TAKE 25%% %s %s @ $%.2f | P&L: $%.2f [2R hit] | Remaining: %.4f units (75%%)",
             pos.side.upper(), pos.pair, current_price, net_pnl, pos.quantity,
         )
 

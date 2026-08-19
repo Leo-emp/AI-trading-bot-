@@ -25,6 +25,7 @@ class Trade:
     pnl: float          # net P&L in quote currency (USDT) after fees
     fees: float         # total fees paid (both sides)
     status: str         # "open" or "closed"
+    close_reason: str = ""  # stop_loss, take_profit, partial_1r, time_exit, force_close
     id: Optional[int] = None
 
 

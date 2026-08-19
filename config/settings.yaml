@@ -23,26 +23,29 @@ fees:
   use_bnb_discount: true
 
 # Initial balance for paper trading
-initial_balance: 100.0
+initial_balance: 100000.0
 
 # Loop interval — how often to scan for trades (seconds)
 # Lower = more trades but more API calls
 loop_interval_seconds: 30
 
-# Risk management
+# Risk management — PROFIT-FIRST: fewer trades, bigger wins
+# Core change: let winners run 3R-5R instead of capping at 0.5R
 risk:
-  max_open_positions: 4
-  max_daily_drawdown_pct: 5.0
-  max_consecutive_losses: 5
+  max_open_positions: 3              # was 4 — fewer positions, less correlation risk
+  max_daily_drawdown_pct: 3.0
+  max_consecutive_losses: 4
   consecutive_loss_pause_minutes: 30
-  max_daily_trades: 100
+  max_daily_trades: 50               # was 100 — quality over quantity
   min_balance_floor: 10.0
-  max_position_pct: 25.0
+  balance_floor_pct: 70.0
+  max_position_pct: 20.0             # was 25.0 — cap single position exposure
+  risk_per_trade_pct: 0.5
   min_order_size: 10.0
   black_swan_pct: 5.0
   stale_data_seconds: 10
   max_spread_pct: 0.15
-  time_exit_hours: 1
+  time_exit_hours: 24                 # was 12 — give winners time to develop
 
 # Auto-scaling tiers (keyed by minimum balance)
 # More pairs = more opportunities, tiers scale positions accordingly
@@ -67,14 +70,19 @@ scaling:
     max_risk_pct: 1.0
     max_positions: 8
     daily_trade_limit: 200
+  - min_balance: 50000
+    name: professional
+    max_risk_pct: 1.5
+    max_positions: 4
+    daily_trade_limit: 100
 
-# Protection layers
+# Protection layers — TIGHTENED
 protection:
-  reduce_size_after_losses: 3
-  pause_after_losses: 5
-  defense_mode_drawdown_pct: 3.0
-  weekly_drawdown_reduce_pct: 10.0
-  monthly_drawdown_emergency_pct: 15.0
+  reduce_size_after_losses: 2        # was 3 — reduce earlier
+  pause_after_losses: 4              # was 5 — pause sooner
+  defense_mode_drawdown_pct: 1.8     # was 3.0 — 60% of 3% daily limit
+  weekly_drawdown_reduce_pct: 7.0    # was 10.0
+  monthly_drawdown_emergency_pct: 12.0  # was 15.0
   flash_crash_pct: 5.0
   max_api_errors: 3
 

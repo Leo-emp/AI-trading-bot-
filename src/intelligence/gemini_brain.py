@@ -26,14 +26,15 @@ class GeminiBrain:
     Per-pair caching prevents stale cross-pair analysis contamination.
     """
 
-    def __init__(self, min_interval_seconds: int = 3600):
-        # Minimum time between API calls PER PAIR (1 hour default)
-        # Free tier: 20 calls/day. With 12 pairs, first cycle uses 12.
-        # 1-hour cache means second batch (8 remaining) fires at +1h.
+    def __init__(self, min_interval_seconds: int = 900):
+        # Minimum time between API calls PER PAIR (15 minutes default)
+        # gemini-2.5-flash-lite free tier: 1500 RPD. With 12 pairs at 15min
+        # intervals = ~1152 calls/day, well within limits.
         self._min_interval = min_interval_seconds
         self._daily_calls = 0
-        self._daily_limit = 18  # save 2 of 20 as buffer
+        self._daily_limit = 200  # conservative cap (1500 RPD available)
         self._rate_limited_until = 0  # global cooldown after 429 error
+        self._last_call_time = 0  # anti-burst: min 3s between API calls
         # Per-pair cache: {"BTC/USDT": {"time": ..., "result": ...}}
         self._cache: dict[str, dict] = {}
         self._model = None
@@ -88,6 +89,12 @@ class GeminiBrain:
             return {"direction": "HOLD", "confidence": 0.0,
                     "reasoning": "rate limited cooldown"}
 
+        # Anti-burst: minimum 3 seconds between actual API calls
+        # Prevents 12 pairs from firing within 1 second on startup
+        if now - self._last_call_time < 3:
+            return {"direction": "HOLD", "confidence": 0.0,
+                    "reasoning": "anti-burst spacing"}
+
         if not self._init_model():
             return {"direction": "HOLD", "confidence": 0.0,
                     "reasoning": "Gemini not available"}
@@ -99,6 +106,7 @@ class GeminiBrain:
             result = self._parse_response(response)
 
             # Cache per pair + count toward daily limit
+            self._last_call_time = now
             self._cache[pair] = {"time": now, "result": result}
             self._daily_calls += 1
             logger.info("Gemini [%d/%d] %s: %s (%.2f confidence) — %s",
@@ -110,9 +118,9 @@ class GeminiBrain:
         except Exception as e:
             err_str = str(e)
             if "429" in err_str or "quota" in err_str.lower():
-                # Rate limited — back off for 1 hour (quota is daily)
-                self._rate_limited_until = now + 3600
-                logger.warning("Gemini rate limited, pausing for 1 hour")
+                # Rate limited — back off for 5 min (API per-minute burst limit)
+                self._rate_limited_until = now + 300
+                logger.warning("Gemini rate limited, pausing for 5 minutes")
             else:
                 logger.error("Gemini analysis failed for %s: %s", pair, e)
             return {"direction": "HOLD", "confidence": 0.0,
@@ -149,10 +157,12 @@ INDICATORS:
 RECENT PRICES (last 10): {recent_prices[-10:] if len(recent_prices) >= 10 else recent_prices}
 {history_section}
 RULES:
-- This is for a small account ($20-100). Capital preservation is #1 priority.
-- Only recommend BUY or SELL if you are at least 60% confident.
-- Consider fees: 0.15% round trip. Net profit must exceed fees.
+- This is a professional paper trading account. Risk management is handled separately.
+- Only recommend BUY or SELL if you are at least 60% confident in a directional move.
+- Consider that we use ATR-based stops (2x ATR), so we need moves of at least 3x ATR to be profitable.
+- Be DECISIVE: if indicators align, commit to a direction. Avoid excessive HOLD signals.
 - If historical context shows similar scenarios mostly lost money, be extra cautious.
+- Look for high-probability setups: trend continuations, breakouts with volume, divergences.
 - If uncertain, recommend HOLD.
 
 Respond in EXACTLY this JSON format, nothing else:

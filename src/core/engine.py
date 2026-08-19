@@ -163,13 +163,15 @@ class TradingEngine:
         self._client = BinanceClient(paper_mode=is_paper)
         await self._client.connect()
 
-        # Initialize protection system
+        # Initialize protection system — TIGHTENED defaults
+        # Old: 5 losses / 8% daily / 50% floor
+        # New: 4 losses / 3% daily / 70% floor
         self._protection = ProtectionSystem(
-            max_consecutive_losses=risk_cfg.get("max_consecutive_losses", 5),
-            daily_drawdown_limit=risk_cfg.get("max_daily_drawdown_pct", 5.0),
-            weekly_drawdown_limit=risk_cfg.get("weekly_drawdown_reduce_pct", 10.0),
-            monthly_drawdown_limit=risk_cfg.get("monthly_drawdown_emergency_pct", 20.0),
-            balance_floor_pct=risk_cfg.get("balance_floor_pct", 50.0),
+            max_consecutive_losses=risk_cfg.get("max_consecutive_losses", 4),
+            daily_drawdown_limit=risk_cfg.get("max_daily_drawdown_pct", 3.0),
+            weekly_drawdown_limit=risk_cfg.get("weekly_drawdown_reduce_pct", 7.0),
+            monthly_drawdown_limit=risk_cfg.get("monthly_drawdown_emergency_pct", 12.0),
+            balance_floor_pct=risk_cfg.get("balance_floor_pct", 70.0),
         )
 
         # Initialize risk manager
@@ -347,12 +349,13 @@ class TradingEngine:
                             elif pos.side == "sell" and new_stop < pos.stop_loss:
                                 pos.stop_loss = new_stop
 
-                        # Once trailing is active, widen TP so trailing stop handles exit
+                        # Once trailing is active, remove TP ceiling entirely.
+                        # The trailing stop IS the exit — a fixed TP caps winners.
                         if exit_state.phase >= 3:
                             original_tp_dist = abs(exit_state.original_tp - exit_state.entry_price)
-                            extended_tp = (pos.entry_price + original_tp_dist * 3
+                            extended_tp = (pos.entry_price + original_tp_dist * 10
                                           if pos.side == "buy"
-                                          else pos.entry_price - original_tp_dist * 3)
+                                          else pos.entry_price - original_tp_dist * 10)
                             pos.take_profit = extended_tp
 
                     # Update trade journal MFE/MAE
@@ -381,6 +384,14 @@ class TradingEngine:
                         )
                         if journal_record:
                             self._adaptive_params.record_outcome(journal_record)
+
+                        # PAIR COOLDOWN: register stop losses for escalating cooldown
+                        # After stop: 30min, 2nd: 60min, 3rd+: 120min
+                        # Only reset on fully profitable close, not partials
+                        if close_reason == "stop_loss" and trade.pnl < 0:
+                            self._risk_manager.register_stop_loss(trade.pair)
+                        elif trade.pnl > 0:
+                            self._risk_manager.register_profitable_close(trade.pair)
 
                         logger.info(
                             "TRADE CLOSED | %s %s | reason=%s | pnl=$%.4f | balance=$%.2f",
@@ -723,6 +734,12 @@ class TradingEngine:
                 logger.info("Risk manager blocked trade for %s", pair)
                 return
 
+            # PAIR COOLDOWN: block re-entry after recent stop losses
+            # Escalating: 30m → 60m → 120m after consecutive stops on same pair
+            # Prevents churn like POL getting stopped 3 times in 45 minutes
+            if self._risk_manager.pair_cooldown_active(pair):
+                return
+
             # --- Step 8: ADAPTIVE INTELLIGENCE — ATR-based SL/TP/sizing ---
             # Use 1-HOUR ATR (not 5m) because trades hold up to 12 hours.
             # 5m ATR is tiny noise ($0.30 for BNB) → everything hits minimum floor.
@@ -778,6 +795,17 @@ class TradingEngine:
                 volume_ratio=vol_ratio,
             )
 
+            # MINIMUM R:R GATE — only enter trades with asymmetric upside
+            # At 2.0:1 minimum, even 40% WR is profitable:
+            # 40 × 2R - 60 × 1R = +20R per 100 trades
+            if dynamic.risk_reward < 2.0:
+                logger.info(
+                    "R:R REJECTED %s: %.1f:1 < 2.0:1 minimum (SL=%.2f%% TP=%.2f%%)",
+                    pair, dynamic.risk_reward,
+                    dynamic.sl_distance_pct, dynamic.tp_distance_pct,
+                )
+                return
+
             # Use adaptive position size instead of Kelly
             position_size = dynamic.position_size
 
@@ -788,6 +816,17 @@ class TradingEngine:
             if protection_status.action == "REDUCE_SIZE":
                 position_size *= 0.5
                 position_size = max(position_size, 10.0)
+
+            # PORTFOLIO EXPOSURE CHECK: max 50% notional, max 2% total initial risk
+            # Prevents correlated crypto positions from compounding losses
+            if not self._risk_manager.check_portfolio_exposure(
+                balance=self._trader.get_balance(),
+                open_positions=self._trader.get_open_positions(),
+                new_position_size=position_size,
+                new_sl_pct=dynamic.sl_distance_pct,
+            ):
+                logger.info("Portfolio exposure limit blocked %s", pair)
+                return
 
             # Build the executable signal with ATR-based SL/TP
             from src.strategies.base import StrategySignal as SigType
@@ -807,10 +846,12 @@ class TradingEngine:
             if trade:
                 pos_id = f"{pair}_{signal.entry_price}"
 
-                # Register with smart exit using ATR-based thresholds
-                # (not fixed 0.2%/0.5%/0.8% — adapts to volatility)
+                # Register with smart exit using R-based thresholds
+                # Thresholds are multiples of initial SL distance (1R),
+                # not raw ATR. This fixes the 0.29R breakeven bug.
                 exit_thresholds = self._adaptive_params.get_smart_exit_thresholds(
-                    atr=atr_value, entry_price=current_price, regime=regime.regime,
+                    atr=atr_value, entry_price=current_price,
+                    regime=regime.regime, strategy=strategy.name,
                 )
                 self._smart_exit.register(
                     pos_id, pair, signal.direction.lower(),

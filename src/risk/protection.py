@@ -40,11 +40,17 @@ class ProtectionSystem:
     """
 
     def __init__(self,
-                 max_consecutive_losses: int = 5,
-                 daily_drawdown_limit: float = 5.0,
-                 weekly_drawdown_limit: float = 10.0,
-                 monthly_drawdown_limit: float = 20.0,
-                 balance_floor_pct: float = 50.0):
+                 # TIGHTENED from 5 → 4: pause sooner to prevent churn
+                 max_consecutive_losses: int = 4,
+                 # TIGHTENED from 5% → 3%: bot was already -$14K at old limits
+                 daily_drawdown_limit: float = 3.0,
+                 # TIGHTENED from 10% → 7%: reduce risk heavily after bad week
+                 weekly_drawdown_limit: float = 7.0,
+                 # TIGHTENED from 20% → 12%: halt and review after -12% month
+                 monthly_drawdown_limit: float = 12.0,
+                 # RAISED from 50% → 70%: hard shutdown if balance < 70% of initial
+                 # At $100K, this means shutdown at $70K instead of $50K
+                 balance_floor_pct: float = 70.0):
         # How many losses in a row before pausing
         self._max_consec_losses = max_consecutive_losses
         # Daily drawdown % that triggers shutdown

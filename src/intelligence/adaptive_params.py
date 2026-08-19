@@ -65,21 +65,21 @@ class AdaptiveParams:
                  # 1.8 ATR capped winners too early — average win was 0.5R vs 1R loss.
                  # The trailing stop handles exit, TP is a safety net for extended moves.
                  tp_atr_multiplier: float = 4.0,
-                 # Risk reduced from 2.0% → 0.5%: prevents outsized losers
-                 # At $100K: max risk = $500 per trade regardless of SL width
-                 # Old 2% + confidence + volume = up to 3.9% = $3,900 at risk
-                 risk_per_trade_pct: float = 0.5,
+                 # Base risk: 1% of equity per trade.
+                 # Confidence scaling: 60% consensus = 1×, 80% = 2×, 100% = 3×
+                 # This puts big money ONLY on highest-conviction trades.
+                 risk_per_trade_pct: float = 1.0,
                  # Min/max bounds to prevent insane values
                  # (0.5% SL minimum = crypto noise floor on 1h timeframe)
                  min_sl_pct: float = 0.5,
                  max_sl_pct: float = 4.0,
-                 # TP bounds widened: winners need room to run 3R-5R
-                 # Trailing stop is the real exit — TP is the ceiling, not the target
+                 # TP set very wide — trailing stop is the real exit.
+                 # No artificial ceiling on profits. Let winners run.
                  min_tp_pct: float = 1.5,
-                 max_tp_pct: float = 15.0,
-                 # Position size bounds
+                 max_tp_pct: float = 50.0,
+                 # Position size bounds — large enough for conviction trades
                  min_position_usd: float = 10.0,
-                 max_position_pct: float = 25.0,
+                 max_position_pct: float = 50.0,
                  # Learning rate (how fast multipliers adapt)
                  learning_rate: float = 0.05):
 
@@ -177,11 +177,21 @@ class AdaptiveParams:
             stop_loss = round(entry_price + sl_distance, 8)
             take_profit = round(entry_price - tp_distance, 8)
 
-        # --- Step 6: FIXED risk-based position sizing ---
-        # Risk per trade = FIXED % of account balance.
-        # This is the ONLY thing that determines position size.
-        # Confidence/volume are entry filters, NOT risk multipliers.
-        risk_amount = balance * self._risk_pct
+        # --- Step 6: CONFIDENCE-SCALED risk-based position sizing ---
+        # Base risk = 1% of balance. Scaled by confidence:
+        #   60% consensus → 1× ($1,000 on $100K)
+        #   80% consensus → 2× ($2,000) — strong agreement
+        #  100% consensus → 3× ($3,000) — all brains agree, go big
+        # This puts serious money only on highest-conviction setups.
+        if confidence >= 0.95:
+            risk_mult = 3.0
+        elif confidence >= 0.80:
+            risk_mult = 2.0
+        elif confidence >= 0.70:
+            risk_mult = 1.5
+        else:
+            risk_mult = 1.0
+        risk_amount = balance * self._risk_pct * risk_mult
 
         # Position size = risk / (distance to SL as fraction)
         # Example: $500 risk / 0.5% SL = $100,000 position

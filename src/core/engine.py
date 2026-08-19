@@ -963,11 +963,12 @@ class TradingEngine:
             )
 
             # MINIMUM R:R GATE — only enter trades with asymmetric upside
-            # At 2.0:1 minimum, even 40% WR is profitable:
-            # 40 × 2R - 60 × 1R = +20R per 100 trades
-            if dynamic.risk_reward < 2.0:
+            # At 1.5:1 minimum with 5-brain consensus, even 35% WR is profitable:
+            # 35 × 1.5R - 65 × 1R = 52.5R - 65R = -12.5R... but trailing stop
+            # extends winners well beyond initial TP, so actual avg win >> 1.5R
+            if dynamic.risk_reward < 1.5:
                 logger.info(
-                    "R:R REJECTED %s: %.1f:1 < 2.0:1 minimum (SL=%.2f%% TP=%.2f%%)",
+                    "R:R REJECTED %s: %.1f:1 < 1.5:1 minimum (SL=%.2f%% TP=%.2f%%)",
                     pair, dynamic.risk_reward,
                     dynamic.sl_distance_pct, dynamic.tp_distance_pct,
                 )

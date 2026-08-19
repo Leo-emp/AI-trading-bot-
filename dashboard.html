@@ -732,7 +732,12 @@
             const positions = botData.positions || [];
 
             positions.forEach(pos => {
-                totalMargin += (pos.margin_locked || 0);
+                // margin_locked = cash reserved for this position
+                // Fallback: if not saved (old positions), use full notional
+                const margin = pos.margin_locked > 0
+                    ? pos.margin_locked
+                    : (pos.entry_price * pos.quantity);
+                totalMargin += margin;
                 // Calculate unrealized P&L using live Binance prices
                 const pair = pos.pair;
                 const livePrice = marketData[pair] ? marketData[pair].price : null;

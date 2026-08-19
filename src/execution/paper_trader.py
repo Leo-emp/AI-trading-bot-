@@ -506,5 +506,10 @@ class PaperTrader:
                 self._balance, len(self._positions),
                 self._total_trades, self._total_wins, age_sec,
             )
+
+            # Resave if positions were loaded with default leverage
+            # (migrates old state files to include leverage/margin_locked)
+            if self._positions:
+                self._save_state()
         except Exception as e:
             logger.error("Failed to load paper state: %s (starting fresh)", e)

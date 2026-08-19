@@ -131,6 +131,7 @@ class TradingEngine:
         # Real grid engine — separate from directional strategies
         self._grid_calculator = None   # initialized in start() from config
         self._grid_executor = None     # initialized in start() from config
+        self._max_concurrent_grids = 3
 
         # Phase 4: ML pipeline
         self._ml_model = MLModel()
@@ -206,8 +207,10 @@ class TradingEngine:
                 fee_rate=fee_rate,
             )
             self._grid_executor = GridExecutor(fee_rate=fee_rate)
-            logger.info("Real grid engine initialized: %d levels, %.1f%% max exposure",
-                       grid_cfg.get("num_levels", 10), grid_cfg.get("max_exposure_pct", 15.0))
+            self._max_concurrent_grids = grid_cfg.get("max_concurrent_grids", 3)
+            logger.info("Real grid engine initialized: %d levels, %.1f%% max exposure, max %d concurrent",
+                       grid_cfg.get("num_levels", 10), grid_cfg.get("max_exposure_pct", 15.0),
+                       self._max_concurrent_grids)
 
         # Phase 5: Initialize RAG memory (starts collecting from day 1)
         self._rag_memory.initialize()
@@ -531,16 +534,15 @@ class TradingEngine:
                 # and triggers PAUSE, which blocks position management (now fixed
                 # above), but also blocks new trades unnecessarily.
                 equity = self._trader.get_equity(self._last_prices)
-                # Include grid exposure + unrealized P&L in equity
-                grid_exposure = 0.0
-                grid_unrealized = 0.0
+                # Grid balance was deducted from trader._balance on activation.
+                # Add back: grid cash (unspent) + exposure (filled positions) + unrealized P&L.
                 if self._grid_executor:
-                    grid_exposure = self._grid_executor.get_open_exposure()
+                    equity += self._grid_executor._grid_cash
+                    equity += self._grid_executor.get_open_exposure()
                     for gp in self._grid_executor.active_pairs:
-                        grid_unrealized += self._grid_executor.get_unrealized_pnl(
+                        equity += self._grid_executor.get_unrealized_pnl(
                             gp, self._last_prices.get(gp, 0),
                         )
-                    equity += grid_exposure + grid_unrealized
                 cash = self._trader.get_balance()
                 logger.info(
                     "ACCOUNT | cash=$%.2f | equity=$%.2f | positions=%d | "
@@ -1047,6 +1049,11 @@ class TradingEngine:
 
         # Not RANGING → no grid activation
         if regime.regime != "RANGING":
+            return False
+
+        # Cap concurrent grids to prevent over-allocation
+        active_count = len(self._grid_executor.active_pairs)
+        if active_count >= self._max_concurrent_grids:
             return False
 
         # Use 4-HOUR BB bands for grid range.

@@ -17,13 +17,14 @@
 import asyncio
 import json
 import os
+import secrets
 import logging
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
 import aiosqlite
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
@@ -39,17 +40,41 @@ LOG_FILE = BASE_DIR / "trading.log"
 HTML_FILE = BASE_DIR / "dashboard.html"
 PORT = int(os.environ.get("DASHBOARD_PORT", "8080"))
 
+# --- Auth ---
+# Set DASHBOARD_TOKEN env var to require ?token=xxx on all requests.
+# Without it, the dashboard is open (protected only by Oracle security list).
+DASHBOARD_TOKEN = os.environ.get("DASHBOARD_TOKEN", "")
+# Allowed origins for WebSocket and CORS (server's own origin always allowed)
+ALLOWED_ORIGINS = {
+    f"http://localhost:{PORT}",
+    f"http://127.0.0.1:{PORT}",
+    f"http://161.118.199.141:{PORT}",
+}
+# Add Vercel frontend origin if configured
+_vercel_origin = os.environ.get("DASHBOARD_CORS_ORIGIN", "")
+if _vercel_origin:
+    ALLOWED_ORIGINS.add(_vercel_origin)
+
 # --- FastAPI App ---
 app = FastAPI(title="AI Trading Bot Dashboard")
 
-# CORS — allows a Vercel frontend to call this API later
+# CORS — restricted to known origins, no credentials needed
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=list(ALLOWED_ORIGINS),
+    allow_credentials=False,
+    allow_methods=["GET"],
     allow_headers=["*"],
 )
+
+
+def verify_token(token: str) -> bool:
+    """Check if the provided token matches DASHBOARD_TOKEN.
+    If no token is configured, all requests pass (open mode).
+    """
+    if not DASHBOARD_TOKEN:
+        return True
+    return secrets.compare_digest(token, DASHBOARD_TOKEN)
 
 
 def read_paper_state() -> dict:
@@ -145,8 +170,10 @@ async def get_bot_data() -> dict:
 # --- HTTP Routes ---
 
 @app.get("/")
-async def index():
-    """Serve the dashboard HTML page."""
+async def index(token: str = Query("")):
+    """Serve the dashboard HTML page (token-gated if DASHBOARD_TOKEN is set)."""
+    if not verify_token(token):
+        return HTMLResponse("<h1>Unauthorized — add ?token=xxx</h1>", status_code=401)
     try:
         html = HTML_FILE.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -155,20 +182,33 @@ async def index():
 
 
 @app.get("/api/data")
-async def api_data():
-    """REST endpoint for initial data load (also useful for Vercel migration)."""
+async def api_data(token: str = Query("")):
+    """REST endpoint for initial data load (token-gated)."""
+    if not verify_token(token):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
     return await get_bot_data()
 
 
 # --- WebSocket Endpoints ---
 
+def _check_ws_origin(websocket: WebSocket) -> bool:
+    """Validate WebSocket origin header against allowlist."""
+    origin = websocket.headers.get("origin", "")
+    if not origin:
+        return True
+    return origin in ALLOWED_ORIGINS
+
+
 @app.websocket("/ws/bot")
-async def bot_websocket(websocket: WebSocket):
+async def bot_websocket(websocket: WebSocket, token: str = Query("")):
     """Stream bot data updates every 5 seconds.
 
     The frontend uses this for: positions, equity, trades, snapshots.
     Market prices come separately from Binance (browser-direct).
     """
+    if not verify_token(token) or not _check_ws_origin(websocket):
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
     try:
         while True:
@@ -184,12 +224,15 @@ async def bot_websocket(websocket: WebSocket):
 
 
 @app.websocket("/ws/logs")
-async def logs_websocket(websocket: WebSocket):
+async def logs_websocket(websocket: WebSocket, token: str = Query("")):
     """Stream trading.log lines in real time.
 
     Sends the last 200 lines on connect, then tails new lines.
     Color coding is done client-side based on log content.
     """
+    if not verify_token(token) or not _check_ws_origin(websocket):
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
     try:
         if LOG_FILE.exists():

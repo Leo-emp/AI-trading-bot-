@@ -43,6 +43,7 @@ from src.intelligence.trade_filter import TradeFilter
 from src.risk.manager import RiskManager
 from src.risk.protection import ProtectionSystem
 from src.ai.trade_gate import TradeGate, BrainSignal
+from src.strategies.base import StrategySignal
 from src.strategies.smart_scalp import SmartScalpStrategy
 from src.strategies.grid import GridStrategy
 from src.strategies.momentum import MomentumStrategy
@@ -703,24 +704,52 @@ class TradingEngine:
                 if grid_handled:
                     return
 
-            # --- Step 4: Select best strategy for this regime ---
-            strategy = self._strategy_selector.select(regime)
-            if strategy is None:
+            # --- Step 4: Evaluate ALL strategies (multi-brain intelligence) ---
+            # Instead of picking one strategy per regime, try every strategy.
+            # Each strategy has its own internal gates (ADX, BB squeeze, etc.)
+            # so inappropriate strategies self-filter. This catches:
+            # - Early trend formations in RANGING (momentum fires at ADX 15)
+            # - Pullback entries in volatile markets (mean_reversion at ADX 12)
+            # - Breakouts the regime detector hasn't classified yet
+            best_signal = None
+            best_strategy_name = None
+            for strat_name, strat_instance in self._strategies.items():
+                strat_config = self._strategies_config.get(strat_name, {})
+                if not strat_config.get("enabled", True):
+                    continue
+                try:
+                    sig = strat_instance.evaluate(df_5m, strat_config, pair=pair)
+                    if sig.direction != "HOLD":
+                        # Take the highest-confidence signal from any strategy
+                        if best_signal is None or sig.confidence > best_signal.confidence:
+                            best_signal = sig
+                            best_strategy_name = strat_name
+                except Exception:
+                    pass
+
+            # Use best strategy instance or fall back to regime-selected
+            strategy = (self._strategies.get(best_strategy_name)
+                       if best_strategy_name
+                       else self._strategy_selector.select(regime))
+            if strategy is None and best_signal is None:
                 logger.info("No strategy available for %s, skipping", pair)
                 return
 
-            strategy_config = self._strategies_config.get(strategy.name, {})
+            # Track which strategy is driving this trade
+            active_strategy = best_strategy_name or (strategy.name if strategy else "none")
+            signal = best_signal or StrategySignal(
+                "HOLD", 0.0, strategy_name=active_strategy,
+            )
 
             # --- Step 5: Collect all 5 brain signals ---
             brain_signals = {}
 
-            # Brain 1: Selected strategy signal (pair passed for per-pair cooldown)
-            signal = strategy.evaluate(df_5m, strategy_config, pair=pair)
+            # Brain 1: Strongest signal from multi-strategy evaluation
             if signal.direction != "HOLD":
                 brain_signals["strategy"] = BrainSignal(
                     direction=signal.direction,
                     confidence=signal.confidence,
-                    source=f"strategy:{strategy.name}",
+                    source=f"strategy:{active_strategy}",
                 )
 
             # Brain 2: Order book analysis
@@ -731,12 +760,14 @@ class TradingEngine:
                     if ob_signal.is_liquid:
                         ob_direction = "HOLD"
                         ob_confidence = 0.5
-                        if ob_signal.imbalance > 0.3:
+                        # Lowered from 0.3 to 0.15 — detect slight order
+                        # flow pressure as confirmation for strategy signals
+                        if ob_signal.imbalance > 0.15:
                             ob_direction = "BUY"
-                            ob_confidence = 0.5 + ob_signal.imbalance * 0.3
-                        elif ob_signal.imbalance < -0.3:
+                            ob_confidence = 0.5 + ob_signal.imbalance * 0.4
+                        elif ob_signal.imbalance < -0.15:
                             ob_direction = "SELL"
-                            ob_confidence = 0.5 + abs(ob_signal.imbalance) * 0.3
+                            ob_confidence = 0.5 + abs(ob_signal.imbalance) * 0.4
                         # Whale detection boosts confidence
                         if ob_signal.whale_detected:
                             if ob_signal.whale_side == "bid" and ob_direction == "BUY":
@@ -827,7 +858,7 @@ class TradingEngine:
             brain_summary = {name: f"{s.direction}({s.confidence:.2f})"
                             for name, s in brain_signals.items()}
             logger.info("Brains for %s: %s | Strategy: %s",
-                       pair, brain_summary, strategy.name)
+                       pair, brain_summary, active_strategy)
 
             gate_decision = self._trade_gate.evaluate(brain_signals)
 
@@ -957,7 +988,7 @@ class TradingEngine:
                 atr=atr_value,
                 balance=self._trader.get_balance(),
                 regime=regime.regime,
-                strategy=strategy.name,
+                strategy=active_strategy,
                 confidence=gate_decision.confidence,
                 volume_ratio=vol_ratio,
             )
@@ -997,14 +1028,13 @@ class TradingEngine:
                 return
 
             # Build the executable signal with ATR-based SL/TP
-            from src.strategies.base import StrategySignal as SigType
-            signal = SigType(
+            signal = StrategySignal(
                 direction=direction,
                 confidence=gate_decision.confidence,
                 entry_price=current_price,
                 stop_loss=dynamic.stop_loss,
                 take_profit=dynamic.take_profit,
-                strategy_name=strategy.name,
+                strategy_name=active_strategy,
                 reasons=gate_decision.reasons,
             )
 
@@ -1020,7 +1050,7 @@ class TradingEngine:
                 # not raw ATR. This fixes the 0.29R breakeven bug.
                 exit_thresholds = self._adaptive_params.get_smart_exit_thresholds(
                     atr=atr_value, entry_price=current_price,
-                    regime=regime.regime, strategy=strategy.name,
+                    regime=regime.regime, strategy=active_strategy,
                 )
                 self._smart_exit.register(
                     pos_id, pair, signal.direction.lower(),
@@ -1040,7 +1070,7 @@ class TradingEngine:
                 self._trade_journal.open_trade(
                     pos_id=pos_id, pair=pair,
                     side=signal.direction.lower(),
-                    strategy=strategy.name, regime=regime.regime,
+                    strategy=active_strategy, regime=regime.regime,
                     entry_price=signal.entry_price,
                     stop_loss=signal.stop_loss,
                     take_profit=signal.take_profit,
@@ -1054,7 +1084,7 @@ class TradingEngine:
                     pair=pair, side=signal.direction,
                     entry=signal.entry_price,
                     sl=signal.stop_loss, tp=signal.take_profit,
-                    size=position_size, strategy=strategy.name,
+                    size=position_size, strategy=active_strategy,
                 )
 
                 logger.info(
@@ -1062,7 +1092,7 @@ class TradingEngine:
                     "SL: $%.2f (%.2f%%) | TP: $%.2f (%.2f%%) | "
                     "Notional: $%.0f | Margin: $%.0f | Leverage: %dx | "
                     "R:R=%.1f:1 | Gate: %d brains (%.0f%% conf) | Regime: %s",
-                    signal.direction, pair, strategy.name,
+                    signal.direction, pair, active_strategy,
                     signal.entry_price,
                     signal.stop_loss, dynamic.sl_distance_pct,
                     signal.take_profit, dynamic.tp_distance_pct,

@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 REGIME_STRATEGY_MAP = {
     "TRENDING_UP": ["momentum", "smart_scalp", "mean_reversion"],
     "TRENDING_DOWN": ["momentum", "smart_scalp", "mean_reversion"],
-    "RANGING": ["grid"],                               # squeeze detection for breakout
+    "RANGING": ["grid", "mean_reversion", "momentum"],  # squeeze + pullback + emerging trend
     "VOLATILE": ["smart_scalp", "grid"],               # breakout + squeeze (big moves)
 }
 

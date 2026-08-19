@@ -14,7 +14,7 @@
 # Only trades in trending markets (ADX > 25)
 smart_scalp:
   enabled: true
-  adx_min: 25              # regime gate: ADX must be > 25 (strong trend)
+  adx_min: 20              # lowered from 25 → 20: catch breakouts earlier
   stop_loss_pct: 0.6       # 0.6% (overridden by ATR-based adaptive params)
   take_profit_pct: 1.5     # 1.5% (overridden by ATR-based adaptive params)
   cooldown_candles: 8      # 40 min — trend filter handles quality control
@@ -36,7 +36,7 @@ grid:
 # ADX > 20 = moderate trend (academic research threshold for momentum)
 momentum:
   enabled: true
-  adx_min: 20              # regime gate: ADX > 20 (momentum research standard)
+  adx_min: 15              # lowered from 20 → 15: detect emerging trends before ADX catches up
   stop_loss_pct: 0.5       # 0.5% (overridden by ATR-based adaptive params)
   take_profit_pct: 2.0     # 2.0% (overridden by ATR-based adaptive params)
   cooldown_candles: 6      # 30 min — momentum setups repeat fast in trends
@@ -47,7 +47,7 @@ momentum:
 # Trend drift provides the tailwind that overcomes fee drag
 mean_reversion:
   enabled: true
-  adx_min: 20              # regime gate: ADX > 20 (trend present)
+  adx_min: 12              # lowered from 20 → 12: pullbacks happen even in mild trends
   stop_loss_pct: 0.6       # 0.6% (overridden by ATR-based adaptive params)
   take_profit_pct: 1.5     # 1.5% (overridden by ATR-based adaptive params)
   cooldown_candles: 8      # 40 min — pullbacks happen frequently in trends

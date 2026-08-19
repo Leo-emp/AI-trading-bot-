@@ -97,14 +97,27 @@ class TradeGate:
 
         total_voting = len(buy_voters) + len(sell_voters)
 
-        # Not enough brains voting at all
+        # Not enough brains voting — unless a primary brain has high conviction.
+        # A strategy or gemini brain with >0.85 confidence can pass alone
+        # to prevent the bot sitting idle on strong setups in quiet markets.
+        high_conviction_override = False
         if total_voting < self._min_absolute:
-            reasons.append(f"only {total_voting} brains voted (need {self._min_absolute})")
-            return GateDecision(
-                approved=False, direction="HOLD",
-                confidence=0.0, agreeing_brains=0,
-                reasons=reasons,
+            all_voters = buy_voters + sell_voters
+            has_strong_primary = any(
+                s.confidence > 0.85
+                and s.source.startswith(("strategy:", "gemini"))
+                for s in all_voters
             )
+            if has_strong_primary:
+                high_conviction_override = True
+                reasons.append("high-conviction override: primary brain > 0.85")
+            else:
+                reasons.append(f"only {total_voting} brains voted (need {self._min_absolute})")
+                return GateDecision(
+                    approved=False, direction="HOLD",
+                    confidence=0.0, agreeing_brains=0,
+                    reasons=reasons,
+                )
 
         # Determine majority direction
         if len(buy_voters) >= len(sell_voters):
@@ -120,7 +133,9 @@ class TradeGate:
         agree_pct = agreeing / total_voting if total_voting > 0 else 0
 
         # Check 1: Percentage consensus
-        if agree_pct < self._consensus_pct or agreeing < self._min_absolute:
+        # High-conviction override relaxes min votes from 2 to 1
+        min_required = 1 if high_conviction_override else self._min_absolute
+        if agree_pct < self._consensus_pct or agreeing < min_required:
             reasons.append(
                 f"{agreeing}/{total_voting} ({agree_pct:.0%}) agree on {majority_dir}, "
                 f"need {self._consensus_pct:.0%}"

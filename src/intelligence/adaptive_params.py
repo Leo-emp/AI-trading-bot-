@@ -373,19 +373,19 @@ class AdaptiveParams:
         sl_mult = self._sl_mult * regime_adj["sl"] * strat_adj["sl"]
         sl_distance = atr * sl_mult  # 1R in price terms
 
-        # BE at 1R: make trade risk-free as soon as it's up 1R
-        # +0.25R buffer survives crypto noise (old 0.10R was too tight)
-        breakeven_distance = sl_distance * 1.00
+        # BE at 0.75R: lock in risk-free FAST — prevents winners reversing
+        # The faster we reach breakeven, the higher the win rate
+        breakeven_distance = sl_distance * 0.75
 
-        # Trailing at 2.5R: after 25% partial at 2R, remaining 75% trails
-        trail_activate_distance = sl_distance * 2.50
+        # Trailing at 2R: start trailing sooner to lock in profit
+        trail_activate_distance = sl_distance * 2.00
 
-        # Tight trailing at 4R: extended move, lock in hard
-        tight_activate_distance = sl_distance * 4.00
+        # Tight trailing at 3R: protect extended moves aggressively
+        tight_activate_distance = sl_distance * 3.00
 
-        # Trail distances widened for crypto volatility
-        trail_distance = sl_distance * 1.00   # 1.0R behind (was 0.75R — too tight)
-        tight_trail_distance = sl_distance * 0.75  # 0.75R behind (was 0.50R)
+        # Tighter trail distances — maximize profit capture
+        trail_distance = sl_distance * 0.75   # 0.75R behind (locks more profit)
+        tight_trail_distance = sl_distance * 0.50  # 0.50R behind (very tight)
 
         breakeven_pct = (breakeven_distance / entry_price) * 100
         trail_activate_pct = (trail_activate_distance / entry_price) * 100
@@ -405,11 +405,11 @@ class AdaptiveParams:
             "tight_activate_pct": tight_activate_pct,
             "trail_distance_pct": trail_distance_pct,
             "tight_trail_pct": tight_trail_pct,
-            "breakeven_r": 1.00,
-            "trail_activate_r": 2.50,
-            "tight_activate_r": 4.00,
-            "trail_distance_r": 1.00,
-            "tight_trail_r": 0.75,
+            "breakeven_r": 0.75,
+            "trail_activate_r": 2.00,
+            "tight_activate_r": 3.00,
+            "trail_distance_r": 0.75,
+            "tight_trail_r": 0.50,
         }
 
     def _save_params(self):

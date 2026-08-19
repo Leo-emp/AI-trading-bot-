@@ -169,47 +169,9 @@ class TradeFilter:
                 "filter": "confidence",
             }
 
-        # --- Filter 5: Correlation exposure ---
-        # BTC-correlated group: most major cryptos move with BTC
-        correlated_group = {"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT",
-                           "ADAUSDT", "DOGEUSDT", "XRPUSDT", "AVAXUSDT",
-                           "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT",
-                           "ADA/USDT", "DOGE/USDT", "XRP/USDT", "AVAX/USDT"}
-
-        if pair in correlated_group:
-            correlated_open = sum(
-                1 for pos in open_positions
-                if getattr(pos, "pair", "") in correlated_group
-            )
-            # In trending markets, allow MORE correlated positions
-            # (riding the same wave across multiple pairs = maximizing the move)
-            hourly = self._hourly_trend.get(pair, "NEUTRAL")
-            max_corr = self._max_correlated
-            if hourly in ("UP", "DOWN"):
-                max_corr = 5  # strong trend: ride it across 5 pairs
-
-            if correlated_open >= max_corr:
-                return {
-                    "pass": False,
-                    "reason": (f"Already {correlated_open} correlated positions open. "
-                              f"Max {max_corr}."),
-                    "filter": "correlation",
-                }
-
-        # --- Filter 6: Direction exposure ---
-        # Prevent all positions being the same direction (clustered risk)
-        if trade_direction:
-            same_dir = sum(
-                1 for pos in open_positions
-                if getattr(pos, "side", "").upper() == trade_direction.upper()
-            )
-            if same_dir >= 6:
-                return {
-                    "pass": False,
-                    "reason": (f"Already {same_dir} {trade_direction} positions. "
-                              f"Max 6 same direction."),
-                    "filter": "direction_exposure",
-                }
+        # Correlation and direction caps REMOVED — the 5-brain consensus
+        # already decides direction from market conditions. Hard caps force
+        # the bot to skip valid signals and miss moves.
 
         # --- All checks passed ---
         logger.debug("Trade filter PASSED for %s (conf=%.0f%%, spread=%.3f%%)",

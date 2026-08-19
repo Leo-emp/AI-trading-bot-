@@ -80,12 +80,31 @@ class GridCalculator:
             return False, "invalid BB width"
         return True, "conditions met"
 
+    def _optimal_level_count(self, bb_lower: float, bb_upper: float) -> int:
+        """Pick level count so each fill profits at least 3× round-trip fees.
+
+        Wider ranges → more levels (more fill opportunities).
+        Narrower ranges → fewer levels (wider spacing = fatter profit per fill).
+        Always between 3 and self._num_levels (config max).
+        """
+        mid = (bb_upper + bb_lower) / 2
+        if mid <= 0:
+            return self._num_levels
+        range_pct = (bb_upper - bb_lower) / mid
+        # Each level must space at least 3× round-trip fee to be comfortably profitable
+        min_spacing_pct = self._fee_rate * 2 * 3
+        # spacing = range / (num_levels + 1)
+        # num_levels = range_pct / min_spacing_pct - 1
+        optimal = int(range_pct / min_spacing_pct) - 1
+        return max(3, min(optimal, self._num_levels))
+
     def calculate_levels(self, bb_lower: float, bb_upper: float,
                          current_price: float,
                          balance: float) -> GridState | None:
         """Calculate grid levels between BB lower and upper.
 
         Returns a GridState ready to activate, or None if invalid.
+        Level count is dynamic — wider ranges get more levels.
         """
         if bb_lower >= bb_upper or bb_lower <= 0:
             logger.warning("Invalid BB range: %.2f - %.2f", bb_lower, bb_upper)
@@ -96,9 +115,11 @@ class GridCalculator:
                           current_price, bb_lower, bb_upper)
             return None
 
+        num_levels = self._optimal_level_count(bb_lower, bb_upper)
+
         # Calculate how much balance to allocate to the grid
         total_grid_allocation = balance * self._max_exposure_pct
-        size_per_level = total_grid_allocation / self._num_levels
+        size_per_level = total_grid_allocation / num_levels
 
         # Minimum viable level size (Binance minimum + fees)
         if size_per_level < 10.0:
@@ -106,9 +127,9 @@ class GridCalculator:
             return None
 
         # Create evenly spaced levels
-        spacing = (bb_upper - bb_lower) / (self._num_levels + 1)
+        spacing = (bb_upper - bb_lower) / (num_levels + 1)
         levels = []
-        for i in range(1, self._num_levels + 1):
+        for i in range(1, num_levels + 1):
             level_price = bb_lower + spacing * i
             levels.append(GridLevel(price=round(level_price, 8)))
 

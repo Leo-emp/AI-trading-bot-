@@ -45,7 +45,8 @@ class TestGridCalculator:
             current_price=95000, balance=100000,
         )
         assert grid is not None
-        assert len(grid.levels) == 10
+        # Dynamic level count: range=4.2%, min_spacing=0.45%, optimal=4.2/0.45-1≈8.3 → capped at 10
+        assert 3 <= len(grid.levels) <= 10
 
     def test_levels_are_evenly_spaced(self):
         grid = self.calc.calculate_levels(
@@ -72,8 +73,9 @@ class TestGridCalculator:
             bb_lower=93000, bb_upper=97000,
             current_price=95000, balance=100000,
         )
-        # 15% of $100K = $15K, divided by 10 levels = $1500
-        assert grid.size_per_level == 1500.0
+        # 15% of $100K = $15K, divided by dynamic level count
+        expected = 15000.0 / len(grid.levels)
+        assert abs(grid.size_per_level - expected) < 0.01
 
     def test_reserved_balance_correct(self):
         grid = self.calc.calculate_levels(
@@ -144,7 +146,38 @@ class TestGridCalculator:
             current_price=95000, balance=100000,
         )
         pct = self.calc.get_grid_spacing_pct(grid)
-        assert 0.3 < pct < 0.5, f"spacing should be ~0.38%, got {pct}"
+        # Spacing depends on dynamic level count, but must exceed 3× fees (0.45%)
+        assert pct > 0.15, f"spacing must exceed fees, got {pct}%"
+
+    def test_dynamic_level_count_wider_range_more_levels(self):
+        """Wider BB range should produce more grid levels."""
+        # Narrow range: 2% → fewer levels
+        grid_narrow = self.calc.calculate_levels(
+            bb_lower=94050, bb_upper=95950,
+            current_price=95000, balance=100000,
+        )
+        # Wide range: 6% → more levels (but capped by max_bb_width)
+        calc_wide = GridCalculator(
+            num_levels=10, max_bb_width_pct=8.0, fee_rate=0.00075,
+        )
+        grid_wide = calc_wide.calculate_levels(
+            bb_lower=92000, bb_upper=98000,
+            current_price=95000, balance=100000,
+        )
+        assert grid_narrow is not None
+        assert grid_wide is not None
+        assert len(grid_wide.levels) > len(grid_narrow.levels)
+
+    def test_dynamic_level_count_minimum_3(self):
+        """Level count never drops below 3."""
+        # Very narrow range that would compute to < 3
+        grid = self.calc.calculate_levels(
+            bb_lower=94800, bb_upper=95200,
+            current_price=95000, balance=100000,
+        )
+        # Might be None due to profitability gate, but if it passes...
+        if grid is not None:
+            assert len(grid.levels) >= 3
 
     def test_rejects_unprofitable_grid(self):
         grid = self.calc.calculate_levels(

@@ -211,8 +211,8 @@ class TradingEngine:
                 max_loss_pct=grid_cfg.get("max_grid_loss_pct", 40.0),
             )
             self._max_concurrent_grids = grid_cfg.get("max_concurrent_grids", 3)
-            logger.info("Real grid engine initialized: %d levels, %.1f%% max exposure, max %d concurrent",
-                       grid_cfg.get("num_levels", 10), grid_cfg.get("max_exposure_pct", 15.0),
+            logger.info("Real grid engine initialized: max %d levels (dynamic), %.1f%% max exposure, max %d concurrent",
+                       grid_cfg.get("num_levels", 8), grid_cfg.get("max_exposure_pct", 15.0),
                        self._max_concurrent_grids)
 
         # Phase 5: Initialize RAG memory (starts collecting from day 1)

@@ -1049,32 +1049,40 @@ class TradingEngine:
         if regime.regime != "RANGING":
             return False
 
-        # Use 1-HOUR BB bands for grid range (not 5-minute).
-        # 5m BB bands are only ~$100 wide for BTC = 0.014% spacing per level,
-        # which is 10× less than round-trip fees (0.15%). Every fill loses money.
-        # 1h BB bands give ~$2000+ ranges = meaningful spacing that profits.
+        # Use 4-HOUR BB bands for grid range.
+        # 1h BB(20) = only 20 hours of data → ~$100-300 BTC range → unprofitable.
+        # 4h BB(20) = 80 hours (3.3 days) → ~$1000-3000 range → profitable spacing.
         try:
-            df_1h = await self._client.get_historical_ohlcv(pair, "1h", limit=30)
-            if df_1h.empty or len(df_1h) < 20:
+            df_4h = await self._client.get_historical_ohlcv(pair, "4h", limit=50)
+            if df_4h.empty or len(df_4h) < 25:
                 return False
-            df_1h = self._indicator_engine.compute_all(df_1h)
-            latest_1h = df_1h.iloc[-1]
-            bb_upper = float(latest_1h.get("bb_upper", 0))
-            bb_lower = float(latest_1h.get("bb_lower", 0))
-            bb_width = float(latest_1h.get("bb_width", 0))
+            df_4h = self._indicator_engine.compute_all(df_4h)
+            latest_4h = df_4h.iloc[-1]
+            bb_upper = float(latest_4h.get("bb_upper", 0))
+            bb_lower = float(latest_4h.get("bb_lower", 0))
+            bb_width = float(latest_4h.get("bb_width", 0))
         except Exception as e:
-            logger.debug("Failed to fetch 1h BB for grid %s: %s", pair, e)
+            logger.debug("Failed to fetch 4h BB for grid %s: %s", pair, e)
             return False
 
         if bb_upper <= 0 or bb_lower <= 0:
             return False
+
+        # Log BB values for diagnosis
+        bb_range = bb_upper - bb_lower
+        bb_mid = (bb_upper + bb_lower) / 2
+        bb_range_pct = (bb_range / bb_mid * 100) if bb_mid > 0 else 0
+        logger.info(
+            "GRID 4h BB | %s | $%.2f-$%.2f (range $%.2f = %.2f%%) | width=%.4f",
+            pair, bb_lower, bb_upper, bb_range, bb_range_pct, bb_width,
+        )
 
         can_activate, reason = self._grid_calculator.can_activate(bb_width, regime.regime)
         if not can_activate:
             logger.debug("Grid rejected for %s: %s", pair, reason)
             return False
 
-        # Calculate grid levels from 1-hour Bollinger Bands
+        # Calculate grid levels from 4-hour Bollinger Bands
         grid_state = self._grid_calculator.calculate_levels(
             bb_lower=bb_lower,
             bb_upper=bb_upper,

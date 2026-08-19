@@ -60,7 +60,7 @@ mean_reversion:
 # Auto-deactivates when price exits range by exit_atr_multiplier × ATR.
 real_grid:
   enabled: true
-  num_levels: 10             # number of evenly-spaced price levels in the grid
+  num_levels: 5              # fewer levels = wider spacing = more profit per fill
   max_exposure_pct: 15.0     # max % of balance allocated to grid positions
   max_bb_width_pct: 5.5      # reject grids when BB width > this (too volatile)
   exit_atr_multiplier: 1.0   # close grid when price exits range by N × ATR

@@ -51,3 +51,16 @@ mean_reversion:
   stop_loss_pct: 0.6       # 0.6% (overridden by ATR-based adaptive params)
   take_profit_pct: 1.5     # 1.5% (overridden by ATR-based adaptive params)
   cooldown_candles: 8      # 40 min — pullbacks happen frequently in trends
+
+# REAL GRID ENGINE — harvests volatility in ranging markets
+# Completely different from the 'grid' strategy above (which is BB squeeze breakout).
+# This creates a ladder of buy/sell levels between Bollinger Bands and
+# profits from EVERY bounce within the range. No prediction needed.
+# Auto-activates when regime is RANGING and BB width < max_bb_width_pct.
+# Auto-deactivates when price exits range by exit_atr_multiplier × ATR.
+real_grid:
+  enabled: true
+  num_levels: 10             # number of evenly-spaced price levels in the grid
+  max_exposure_pct: 15.0     # max % of balance allocated to grid positions
+  max_bb_width_pct: 5.5      # reject grids when BB width > this (too volatile)
+  exit_atr_multiplier: 1.0   # close grid when price exits range by N × ATR

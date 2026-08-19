@@ -51,6 +51,8 @@ from src.execution.paper_trader import PaperTrader
 from src.execution.trailing_stop import TrailingStopManager
 from src.execution.smart_exit import SmartExitManager
 from src.execution.adaptive_sizer import AdaptiveSizer
+from src.strategies.real_grid import GridCalculator
+from src.execution.grid_executor import GridExecutor
 from src.intelligence.adaptive_params import AdaptiveParams
 from src.intelligence.trade_journal import TradeJournal
 from src.notifications.telegram import TelegramNotifier
@@ -126,6 +128,10 @@ class TradingEngine:
         self._adaptive_params = AdaptiveParams()
         self._trade_journal = TradeJournal()
 
+        # Real grid engine — separate from directional strategies
+        self._grid_calculator = None   # initialized in start() from config
+        self._grid_executor = None     # initialized in start() from config
+
         # Phase 4: ML pipeline
         self._ml_model = MLModel()
         self._feature_engineer = FeatureEngineer()
@@ -187,6 +193,21 @@ class TradingEngine:
             max_positions=tier.get("max_positions", 3),
             time_exit_hours=self._settings.get("risk", {}).get("time_exit_hours", 1),
         )
+
+        # Initialize real grid engine from config
+        grid_cfg = self._strategies_config.get("real_grid", {})
+        if grid_cfg.get("enabled", False):
+            fee_rate = self._settings["fees"]["maker_rate"]
+            self._grid_calculator = GridCalculator(
+                num_levels=grid_cfg.get("num_levels", 10),
+                max_grid_exposure_pct=grid_cfg.get("max_exposure_pct", 15.0),
+                max_bb_width_pct=grid_cfg.get("max_bb_width_pct", 5.5),
+                exit_atr_multiplier=grid_cfg.get("exit_atr_multiplier", 1.0),
+                fee_rate=fee_rate,
+            )
+            self._grid_executor = GridExecutor(fee_rate=fee_rate)
+            logger.info("Real grid engine initialized: %d levels, %.1f%% max exposure",
+                       grid_cfg.get("num_levels", 10), grid_cfg.get("max_exposure_pct", 15.0))
 
         # Phase 5: Initialize RAG memory (starts collecting from day 1)
         self._rag_memory.initialize()
@@ -409,6 +430,80 @@ class TradingEngine:
             except Exception as e:
                 logger.error("Position management error for %s: %s", pair, e)
 
+        # Manage active grid positions (separate from directional)
+        await self._manage_grid_positions()
+
+    async def _manage_grid_positions(self):
+        """Update all active grid positions with current prices.
+
+        Grids run independently from directional trades.
+        Each cycle: check for fills, check for range breakout.
+        """
+        if not self._grid_executor or not self._grid_executor.active_pairs:
+            return
+
+        for pair in list(self._grid_executor.active_pairs):
+            try:
+                df = await self._client.get_historical_ohlcv(pair, "1m", limit=2)
+                if df.empty:
+                    continue
+
+                latest = df.iloc[-1]
+                current_price = float(latest["close"])
+                candle_high = float(latest["high"])
+                candle_low = float(latest["low"])
+                self._last_prices[pair] = current_price
+
+                # Update grid — execute any buy/sell fills
+                fills = self._grid_executor.update(pair, current_price, candle_high, candle_low)
+                for fill in fills:
+                    logger.info(
+                        "GRID FILL | %s | buy=$%.2f sell=$%.2f | net=$%.4f | total_fills=%d",
+                        pair, fill.buy_price, fill.sell_price, fill.net_pnl,
+                        self._grid_executor.total_fills,
+                    )
+
+                # Check if price has broken out of the range (trend starting)
+                grid = self._grid_executor.get_grid(pair)
+                if grid:
+                    # Use 1h ATR for breakout detection
+                    df_1h = await self._client.get_historical_ohlcv(pair, "1h", limit=20)
+                    atr = current_price * 0.01  # fallback 1%
+                    if not df_1h.empty and len(df_1h) >= 15:
+                        high = df_1h["high"].values
+                        low = df_1h["low"].values
+                        close = df_1h["close"].values
+                        trs = []
+                        for i in range(1, len(high)):
+                            tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+                            trs.append(tr)
+                        if len(trs) >= 14:
+                            atr = sum(trs[-14:]) / 14
+
+                    should_close, reason = self._grid_calculator.should_close_grid(current_price, grid, atr)
+                    if should_close:
+                        balance_return, summary = self._grid_executor.deactivate_grid(pair, current_price)
+                        self._trader._balance += balance_return
+                        logger.info("GRID DEACTIVATED | %s | %s | returned $%.2f to paper balance",
+                                   pair, reason, balance_return)
+                        await self._notifier.send_trade(
+                            pair=pair, side="GRID_CLOSE", entry=0,
+                            sl=0, tp=0, size=balance_return,
+                            strategy=f"real_grid: {summary}",
+                        )
+                    else:
+                        status = self._grid_executor.get_status(pair)
+                        unrealized = self._grid_executor.get_unrealized_pnl(pair, current_price)
+                        logger.info(
+                            "GRID STATUS | %s | holding=%d/%d | fills=%d | "
+                            "realized=$%.4f | unrealized=$%.4f | cash=$%.2f",
+                            pair, status["holding"], status["levels"],
+                            status["fills"], status["pnl"], unrealized, status["grid_cash"],
+                        )
+
+            except Exception as e:
+                logger.error("Grid management error for %s: %s", pair, e)
+
     async def run(self):
         """Main trading loop. Runs until stop() is called."""
         if not self._running:
@@ -436,12 +531,25 @@ class TradingEngine:
                 # and triggers PAUSE, which blocks position management (now fixed
                 # above), but also blocks new trades unnecessarily.
                 equity = self._trader.get_equity(self._last_prices)
+                # Include grid exposure + unrealized P&L in equity
+                grid_exposure = 0.0
+                grid_unrealized = 0.0
+                if self._grid_executor:
+                    grid_exposure = self._grid_executor.get_open_exposure()
+                    for gp in self._grid_executor.active_pairs:
+                        grid_unrealized += self._grid_executor.get_unrealized_pnl(
+                            gp, self._last_prices.get(gp, 0),
+                        )
+                    equity += grid_exposure + grid_unrealized
                 cash = self._trader.get_balance()
                 logger.info(
-                    "ACCOUNT | cash=$%.2f | equity=$%.2f | positions=%d | unrealizedPnL=$%.2f",
+                    "ACCOUNT | cash=$%.2f | equity=$%.2f | positions=%d | "
+                    "grids=%d | unrealizedPnL=$%.2f | gridPnL=$%.2f",
                     cash, equity,
                     len(self._trader.get_open_positions()),
+                    len(self._grid_executor.active_pairs) if self._grid_executor else 0,
                     self._trader.get_unrealized_pnl(self._last_prices),
+                    self._grid_executor.total_pnl if self._grid_executor else 0,
                 )
 
                 # Step 1: Check protection system — using EQUITY not cash
@@ -535,6 +643,17 @@ class TradingEngine:
             regime = self._regime_detector.detect(df_5m)
             logger.info("Regime: %s (%.0f%% confidence, %s volatility)",
                        regime.regime, regime.confidence * 100, regime.volatility)
+
+            # --- Step 3b: GRID MODE — activate/skip if RANGING ---
+            # Real grid engine handles ranging markets separately from
+            # the directional 5-brain pipeline. If grid activates,
+            # skip the entire directional flow for this pair.
+            if self._grid_calculator and self._grid_executor:
+                grid_handled = await self._try_grid_mode(
+                    pair, regime, df_5m, current_price,
+                )
+                if grid_handled:
+                    return
 
             # --- Step 4: Select best strategy for this regime ---
             strategy = self._strategy_selector.select(regime)
@@ -904,6 +1023,82 @@ class TradingEngine:
 
         except Exception as e:
             logger.error("Error processing %s: %s", pair, e)
+
+    async def _try_grid_mode(self, pair: str, regime, df_5m, current_price: float) -> bool:
+        """Try to activate or manage grid mode for a ranging pair.
+
+        Returns True if grid is handling this pair (skip directional pipeline).
+        Returns False if grid can't activate (fall through to directional).
+        """
+        grid_active = pair in self._grid_executor.active_pairs
+
+        # If regime changed AWAY from RANGING and grid is active → deactivate
+        if grid_active and regime.regime != "RANGING":
+            balance_return, summary = self._grid_executor.deactivate_grid(pair, current_price)
+            self._trader._balance += balance_return
+            logger.info("GRID → TREND switch | %s | regime=%s | %s | returned $%.2f",
+                       pair, regime.regime, summary, balance_return)
+            return False  # let directional pipeline take over
+
+        # If grid is already active for this pair, it's being managed
+        # by _manage_grid_positions() — skip directional pipeline
+        if grid_active:
+            return True
+
+        # Not RANGING → no grid activation
+        if regime.regime != "RANGING":
+            return False
+
+        # Check BB conditions for grid activation
+        latest = df_5m.iloc[-1]
+        bb_upper = float(latest.get("bb_upper", 0))
+        bb_lower = float(latest.get("bb_lower", 0))
+        bb_width = float(latest.get("bb_width", 0))
+
+        if bb_upper <= 0 or bb_lower <= 0:
+            return False
+
+        can_activate, reason = self._grid_calculator.can_activate(bb_width, regime.regime)
+        if not can_activate:
+            logger.debug("Grid rejected for %s: %s", pair, reason)
+            return False
+
+        # Calculate grid levels from Bollinger Bands
+        grid_state = self._grid_calculator.calculate_levels(
+            bb_lower=bb_lower,
+            bb_upper=bb_upper,
+            current_price=current_price,
+            balance=self._trader.get_balance(),
+        )
+        if grid_state is None:
+            return False
+
+        # Activate the grid — reserves balance from paper trader
+        ok, msg = self._grid_executor.activate_grid(pair, grid_state, self._trader.get_balance())
+        if not ok:
+            logger.info("Grid activation failed for %s: %s", pair, msg)
+            return False
+
+        # Deduct reserved balance from paper trader
+        self._trader._balance -= grid_state.reserved_balance
+
+        # Log grid activation details
+        spacing_pct = self._grid_calculator.get_grid_spacing_pct(grid_state)
+        profit_per_fill = self._grid_calculator.get_profit_per_fill(grid_state)
+        logger.info(
+            "GRID ACTIVATED | %s | range $%.2f-$%.2f | %d levels | "
+            "spacing=%.3f%% | est_profit/fill=$%.4f | reserved=$%.2f",
+            pair, grid_state.lower_bound, grid_state.upper_bound,
+            len(grid_state.levels), spacing_pct, profit_per_fill,
+            grid_state.reserved_balance,
+        )
+        await self._notifier.send_trade(
+            pair=pair, side="GRID_OPEN", entry=current_price,
+            sl=grid_state.lower_bound, tp=grid_state.upper_bound,
+            size=grid_state.reserved_balance, strategy="real_grid",
+        )
+
+        return True  # grid is handling this pair
 
     async def _check_daily_summary(self):
         """Send daily summary at midnight UTC."""

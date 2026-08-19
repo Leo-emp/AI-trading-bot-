@@ -1049,11 +1049,22 @@ class TradingEngine:
         if regime.regime != "RANGING":
             return False
 
-        # Check BB conditions for grid activation
-        latest = df_5m.iloc[-1]
-        bb_upper = float(latest.get("bb_upper", 0))
-        bb_lower = float(latest.get("bb_lower", 0))
-        bb_width = float(latest.get("bb_width", 0))
+        # Use 1-HOUR BB bands for grid range (not 5-minute).
+        # 5m BB bands are only ~$100 wide for BTC = 0.014% spacing per level,
+        # which is 10× less than round-trip fees (0.15%). Every fill loses money.
+        # 1h BB bands give ~$2000+ ranges = meaningful spacing that profits.
+        try:
+            df_1h = await self._client.get_historical_ohlcv(pair, "1h", limit=30)
+            if df_1h.empty or len(df_1h) < 20:
+                return False
+            df_1h = self._indicator_engine.compute_all(df_1h)
+            latest_1h = df_1h.iloc[-1]
+            bb_upper = float(latest_1h.get("bb_upper", 0))
+            bb_lower = float(latest_1h.get("bb_lower", 0))
+            bb_width = float(latest_1h.get("bb_width", 0))
+        except Exception as e:
+            logger.debug("Failed to fetch 1h BB for grid %s: %s", pair, e)
+            return False
 
         if bb_upper <= 0 or bb_lower <= 0:
             return False
@@ -1063,7 +1074,7 @@ class TradingEngine:
             logger.debug("Grid rejected for %s: %s", pair, reason)
             return False
 
-        # Calculate grid levels from Bollinger Bands
+        # Calculate grid levels from 1-hour Bollinger Bands
         grid_state = self._grid_calculator.calculate_levels(
             bb_lower=bb_lower,
             bb_upper=bb_upper,

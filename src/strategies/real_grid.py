@@ -110,7 +110,7 @@ class GridCalculator:
             level_price = bb_lower + spacing * i
             levels.append(GridLevel(price=round(level_price, 8)))
 
-        return GridState(
+        grid = GridState(
             pair="",  # set by caller
             lower_bound=bb_lower,
             upper_bound=bb_upper,
@@ -119,6 +119,25 @@ class GridCalculator:
             fee_rate=self._fee_rate,
             reserved_balance=round(total_grid_allocation, 2),
         )
+
+        # PROFITABILITY GATE: reject grids where spacing can't beat fees.
+        # Each fill pays round-trip fees (buy + sell). If spacing % < 2× fee,
+        # every single fill LOSES money. This was the production bug where
+        # 5-minute BB bands gave $100 ranges on BTC = 0.014% spacing vs
+        # 0.15% round-trip fees = guaranteed loss on every fill.
+        profit = self.get_profit_per_fill(grid)
+        if profit <= 0:
+            mid = (bb_upper + bb_lower) / 2
+            spacing_pct = (spacing / mid * 100) if mid > 0 else 0
+            fee_pct = self._fee_rate * 2 * 100
+            logger.info(
+                "Grid rejected: spacing %.4f%% < fees %.3f%% → "
+                "every fill loses $%.4f. Range too tight ($%.2f-$%.2f)",
+                spacing_pct, fee_pct, abs(profit), bb_lower, bb_upper,
+            )
+            return None
+
+        return grid
 
     def should_close_grid(self, current_price: float, grid: GridState,
                           atr: float) -> tuple[bool, str]:

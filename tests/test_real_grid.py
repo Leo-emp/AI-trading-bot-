@@ -153,6 +153,20 @@ class TestGridCalculator:
         # $363.6 / $95000 midpoint = 0.38%
         assert 0.3 < pct < 0.5, f"spacing should be ~0.38%, got {pct}"
 
+    def test_rejects_unprofitable_grid(self):
+        """If BB range is so tight that spacing < fees, reject the grid.
+
+        This was the production bug: 5m BB gave $100 range on BTC,
+        spacing = 0.014% vs 0.15% round-trip fees = loss on every fill.
+        """
+        # $100 range on $95K BTC = 10 levels = $9 spacing = 0.0095%
+        # Round-trip fees = 0.15%. 0.0095% < 0.15% → unprofitable → rejected
+        grid = self.calc.calculate_levels(
+            bb_lower=94950, bb_upper=95050,  # only $100 range
+            current_price=95000, balance=100000,
+        )
+        assert grid is None, "should reject grid where spacing < fees"
+
 
 class TestGridExecutor:
     """Test grid execution — buys, sells, P&L tracking."""

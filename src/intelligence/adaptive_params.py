@@ -181,37 +181,38 @@ class AdaptiveParams:
             take_profit = round(entry_price - tp_distance, 8)
 
         # --- Step 6: CONFIDENCE-SCALED risk + LEVERAGE ---
-        # Base risk = 0.5% of balance. Scaled by confidence:
-        #   60% consensus → 1× ($500 on $100K) — max loss $500
-        #   70% consensus → 1.25× ($625)
-        #   80% consensus → 1.5× ($750) — strong agreement
-        #   95% consensus → 2× ($1,000) — all brains agree
-        # Capped at 2× to keep losses small. Leverage provides
-        # the position size, not risk scaling.
+        # Base risk = 0.5% of balance. AGGRESSIVE scaling on high conviction:
+        #   <70% → 1× ($500 on $100K) — cautious, small loss
+        #   70%  → 1.5× ($750) — moderate
+        #   80%  → 2.5× ($1,250) — strong, go bigger
+        #   95%+ → 4× ($2,000) — full consensus, maximum size
+        # Low confidence = small loss. High confidence = big position = big win.
         if confidence >= 0.95:
-            risk_mult = 2.0
+            risk_mult = 4.0
         elif confidence >= 0.80:
-            risk_mult = 1.5
+            risk_mult = 2.5
         elif confidence >= 0.70:
-            risk_mult = 1.25
+            risk_mult = 1.5
         else:
             risk_mult = 1.0
         risk_amount = balance * self._risk_pct * risk_mult
 
-        # FUTURES LEVERAGE: confidence → leverage tier (reduced)
-        # Lower leverage = less margin locked = smaller absolute losses
-        #   <70% → 2×  (conservative)
-        #   70%  → 3×  (moderate)
-        #   80%  → 5×  (strong — multiple brains agree)
-        #   95%+ → 10× (maximum — full consensus, still controlled)
+        # FUTURES LEVERAGE: confidence → leverage tier (AGGRESSIVE)
+        # Higher leverage = bigger position for same margin = bigger wins.
+        # Risk is STILL capped by SL — leverage doesn't change max loss,
+        # it changes position size (and therefore profit potential).
+        #   <70% → 3×  (cautious)
+        #   70%  → 5×  (moderate)
+        #   80%  → 10× (strong — multiple brains agree)
+        #   95%+ → 20× (maximum — full consensus, go big)
         if confidence >= 0.95:
-            leverage = 10
+            leverage = 20
         elif confidence >= 0.80:
-            leverage = 5
+            leverage = 10
         elif confidence >= 0.70:
-            leverage = 3
+            leverage = 5
         else:
-            leverage = 2
+            leverage = 3
 
         # Position size = risk / (distance to SL as fraction)
         if sl_pct > 0:

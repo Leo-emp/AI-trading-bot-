@@ -31,26 +31,27 @@ class TradeFilter:
     """
 
     def __init__(self,
-                 min_confidence: float = 0.60,
-                 max_spread_pct: float = 0.06,
-                 cooldown_minutes: int = 5,
-                 max_correlated_positions: int = 3,
+                 min_confidence: float = 0.55,
+                 max_spread_pct: float = 0.25,
+                 cooldown_minutes: int = 2,
+                 max_correlated_positions: int = 5,
                  dead_hours_utc: Optional[list[int]] = None):
         # Minimum average confidence from agreeing brains
-        # 0.60 = brains must be reasonably sure (raised from 0.55)
+        # 0.55 = let more trades through, gate already pre-filtered
         self._min_confidence = min_confidence
 
         # Maximum bid-ask spread as % of price
+        # 0.25% is generous — covers all 12 pairs on Binance
         self._max_spread_pct = max_spread_pct
 
-        # Minutes to wait after a losing trade
+        # Minutes to wait after a losing trade — short, don't miss moves
         self._cooldown_minutes = cooldown_minutes
 
-        # Max positions in correlated assets
+        # Max positions in correlated assets — higher for more exposure
         self._max_correlated = max_correlated_positions
 
         # Hours in UTC where volume is lowest
-        self._dead_hours = dead_hours_utc or [0, 1]
+        self._dead_hours = dead_hours_utc or []
 
         # Track last loss time for cooldown
         self._last_loss_time: Optional[datetime] = None
@@ -202,11 +203,11 @@ class TradeFilter:
                 1 for pos in open_positions
                 if getattr(pos, "side", "").upper() == trade_direction.upper()
             )
-            if same_dir >= 3:
+            if same_dir >= 4:
                 return {
                     "pass": False,
                     "reason": (f"Already {same_dir} {trade_direction} positions. "
-                              f"Max 3 same direction."),
+                              f"Max 4 same direction."),
                     "filter": "direction_exposure",
                 }
 

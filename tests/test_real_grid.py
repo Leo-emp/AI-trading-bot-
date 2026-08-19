@@ -15,10 +15,11 @@ class TestGridCalculator:
     def setup_method(self):
         self.calc = GridCalculator(
             num_levels=10,
-            max_grid_exposure_pct=15.0,
+            max_grid_exposure_pct=35.0,
             max_bb_width_pct=5.5,
             exit_atr_multiplier=1.0,
             fee_rate=0.00075,
+            min_profit_per_fill=20.0,
         )
 
     def test_can_activate_in_ranging(self):
@@ -73,8 +74,8 @@ class TestGridCalculator:
             bb_lower=93000, bb_upper=97000,
             current_price=95000, balance=100000,
         )
-        # 15% of $100K = $15K, divided by dynamic level count
-        expected = 15000.0 / len(grid.levels)
+        # 35% of $100K = $35K, divided by dynamic level count
+        expected = 35000.0 / len(grid.levels)
         assert abs(grid.size_per_level - expected) < 0.01
 
     def test_reserved_balance_correct(self):
@@ -82,7 +83,7 @@ class TestGridCalculator:
             bb_lower=93000, bb_upper=97000,
             current_price=95000, balance=100000,
         )
-        assert grid.reserved_balance == 15000.0
+        assert grid.reserved_balance == 35000.0
 
     def test_rejects_invalid_bb_range(self):
         grid = self.calc.calculate_levels(
@@ -156,9 +157,10 @@ class TestGridCalculator:
             bb_lower=94050, bb_upper=95950,
             current_price=95000, balance=100000,
         )
-        # Wide range: 6% → more levels (but capped by max_bb_width)
+        # Wide range: 6% → more levels
         calc_wide = GridCalculator(
             num_levels=10, max_bb_width_pct=8.0, fee_rate=0.00075,
+            max_grid_exposure_pct=35.0, min_profit_per_fill=20.0,
         )
         grid_wide = calc_wide.calculate_levels(
             bb_lower=92000, bb_upper=98000,
@@ -178,6 +180,16 @@ class TestGridCalculator:
         # Might be None due to profitability gate, but if it passes...
         if grid is not None:
             assert len(grid.levels) >= 3
+
+    def test_min_profit_target_met(self):
+        """Every grid must hit the $20 minimum profit per fill."""
+        grid = self.calc.calculate_levels(
+            bb_lower=93000, bb_upper=97000,
+            current_price=95000, balance=100000,
+        )
+        assert grid is not None
+        profit = self.calc.get_profit_per_fill(grid)
+        assert profit >= 20.0, f"profit per fill ${profit:.2f} < $20 target"
 
     def test_rejects_unprofitable_grid(self):
         grid = self.calc.calculate_levels(

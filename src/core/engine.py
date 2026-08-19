@@ -201,19 +201,20 @@ class TradingEngine:
             fee_rate = self._settings["fees"]["maker_rate"]
             self._grid_calculator = GridCalculator(
                 num_levels=grid_cfg.get("num_levels", 10),
-                max_grid_exposure_pct=grid_cfg.get("max_exposure_pct", 15.0),
+                max_grid_exposure_pct=grid_cfg.get("max_exposure_pct", 35.0),
                 max_bb_width_pct=grid_cfg.get("max_bb_width_pct", 5.5),
                 exit_atr_multiplier=grid_cfg.get("exit_atr_multiplier", 1.0),
                 fee_rate=fee_rate,
+                min_profit_per_fill=grid_cfg.get("min_profit_per_fill", 20.0),
             )
             self._grid_executor = GridExecutor(
                 fee_rate=fee_rate,
                 max_loss_pct=grid_cfg.get("max_grid_loss_pct", 40.0),
             )
             self._max_concurrent_grids = grid_cfg.get("max_concurrent_grids", 3)
-            logger.info("Real grid engine initialized: max %d levels (dynamic), %.1f%% max exposure, max %d concurrent",
-                       grid_cfg.get("num_levels", 8), grid_cfg.get("max_exposure_pct", 15.0),
-                       self._max_concurrent_grids)
+            logger.info("Real grid engine initialized: max %d levels (dynamic), %.1f%% exposure, $%.0f min profit/fill, max %d concurrent",
+                       grid_cfg.get("num_levels", 10), grid_cfg.get("max_exposure_pct", 35.0),
+                       grid_cfg.get("min_profit_per_fill", 20.0), self._max_concurrent_grids)
 
         # Phase 5: Initialize RAG memory (starts collecting from day 1)
         self._rag_memory.initialize()

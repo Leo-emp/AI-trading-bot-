@@ -60,8 +60,9 @@ mean_reversion:
 # Auto-deactivates when price exits range by exit_atr_multiplier × ATR.
 real_grid:
   enabled: true
-  num_levels: 10             # max levels (actual count is dynamic based on range width)
-  max_exposure_pct: 25.0     # max % of balance allocated to grid positions
+  num_levels: 10             # max levels (actual count is dynamic — reduced until profit target hit)
+  max_exposure_pct: 35.0     # max % of balance allocated to grid positions
+  min_profit_per_fill: 20.0  # minimum $ profit per fill — reduces levels until this is met
   max_bb_width_pct: 5.5      # reject grids when BB width > this (too volatile)
   exit_atr_multiplier: 1.0   # close grid when price exits range by N × ATR
   max_concurrent_grids: 3    # cap to prevent over-allocation of balance

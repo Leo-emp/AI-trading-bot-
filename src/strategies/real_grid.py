@@ -63,12 +63,14 @@ class GridCalculator:
                  max_grid_exposure_pct: float = 15.0,
                  max_bb_width_pct: float = 5.5,
                  exit_atr_multiplier: float = 1.0,
-                 fee_rate: float = 0.00075):
+                 fee_rate: float = 0.00075,
+                 min_profit_per_fill: float = 20.0):
         self._num_levels = num_levels
         self._max_exposure_pct = max_grid_exposure_pct / 100
         self._max_bb_width = max_bb_width_pct / 100
         self._exit_atr_mult = exit_atr_multiplier
         self._fee_rate = fee_rate
+        self._min_profit = min_profit_per_fill
 
     def can_activate(self, bb_width: float, regime: str) -> tuple[bool, str]:
         """Check if conditions allow grid activation."""
@@ -80,23 +82,32 @@ class GridCalculator:
             return False, "invalid BB width"
         return True, "conditions met"
 
-    def _optimal_level_count(self, bb_lower: float, bb_upper: float) -> int:
-        """Pick level count so each fill profits at least 3× round-trip fees.
+    def _optimal_level_count(self, bb_lower: float, bb_upper: float,
+                             balance: float) -> int:
+        """Pick level count so each fill profits at least $min_profit.
 
-        Wider ranges → more levels (more fill opportunities).
-        Narrower ranges → fewer levels (wider spacing = fatter profit per fill).
-        Always between 3 and self._num_levels (config max).
+        Starts from the max level count that beats fees, then reduces
+        until each fill hits the profit target. Fewer levels = bigger
+        position per level = bigger profit per fill.
         """
         mid = (bb_upper + bb_lower) / 2
         if mid <= 0:
-            return self._num_levels
+            return 3
         range_pct = (bb_upper - bb_lower) / mid
-        # Each level must space at least 3× round-trip fee to be comfortably profitable
-        min_spacing_pct = self._fee_rate * 2 * 3
-        # spacing = range / (num_levels + 1)
-        # num_levels = range_pct / min_spacing_pct - 1
-        optimal = int(range_pct / min_spacing_pct) - 1
-        return max(3, min(optimal, self._num_levels))
+        fee_pct = self._fee_rate * 2
+        total_alloc = balance * self._max_exposure_pct
+
+        # Start from max feasible (spacing > fees) and work down
+        for n in range(self._num_levels, 2, -1):
+            spacing_pct = range_pct / (n + 1)
+            if spacing_pct <= fee_pct:
+                continue
+            size = total_alloc / n
+            profit = size * (spacing_pct - fee_pct)
+            if profit >= self._min_profit:
+                return n
+
+        return 3
 
     def calculate_levels(self, bb_lower: float, bb_upper: float,
                          current_price: float,
@@ -115,7 +126,7 @@ class GridCalculator:
                           current_price, bb_lower, bb_upper)
             return None
 
-        num_levels = self._optimal_level_count(bb_lower, bb_upper)
+        num_levels = self._optimal_level_count(bb_lower, bb_upper, balance)
 
         # Calculate how much balance to allocate to the grid
         total_grid_allocation = balance * self._max_exposure_pct

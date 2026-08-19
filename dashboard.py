@@ -183,7 +183,8 @@ async def index(token: str = Query("")):
         html = HTML_FILE.read_text(encoding="utf-8")
     except FileNotFoundError:
         html = "<h1>dashboard.html not found — place it next to dashboard.py</h1>"
-    return HTMLResponse(html)
+    # No-cache so browser always loads latest dashboard code
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 
 @app.get("/api/data")

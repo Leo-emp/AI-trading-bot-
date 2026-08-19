@@ -63,7 +63,8 @@ class AdaptiveParams:
 
     def __init__(self,
                  # Base ATR multipliers (starting points — will adapt)
-                 sl_atr_multiplier: float = 2.0,
+                 # Tightened from 2.0 to 1.5: 25% smaller losses, still outside noise
+                 sl_atr_multiplier: float = 1.5,
                  # TP widened from 1.8 → 4.0: let winners run to 3R-5R.
                  # 1.8 ATR capped winners too early — average win was 0.5R vs 1R loss.
                  # The trailing stop handles exit, TP is a safety net for extended moves.
@@ -373,19 +374,41 @@ class AdaptiveParams:
         sl_mult = self._sl_mult * regime_adj["sl"] * strat_adj["sl"]
         sl_distance = atr * sl_mult  # 1R in price terms
 
-        # BE at 0.75R: lock in risk-free FAST — prevents winners reversing
-        # The faster we reach breakeven, the higher the win rate
-        breakeven_distance = sl_distance * 0.75
-
-        # Trailing at 2R: start trailing sooner to lock in profit
-        trail_activate_distance = sl_distance * 2.00
-
-        # Tight trailing at 3R: protect extended moves aggressively
-        tight_activate_distance = sl_distance * 3.00
-
-        # Tighter trail distances — maximize profit capture
-        trail_distance = sl_distance * 0.75   # 0.75R behind (locks more profit)
-        tight_trail_distance = sl_distance * 0.50  # 0.50R behind (very tight)
+        # REGIME-AWARE EXIT THRESHOLDS
+        # The old one-size-fits-all BE at 0.75R was killing every winner:
+        #   price moves 0.75R → BE triggers → SL at entry+0.25R →
+        #   normal retracement stops out for $11 profit.
+        # Meanwhile losses run full 1R ($80+). This is backwards.
+        #
+        # Fix: different exit behavior per market type:
+        # RANGING: NO breakeven (it's a trap), use early trailing instead
+        # TRENDING: delayed breakeven at 1.5R (real move, not noise)
+        # VOLATILE: moderate breakeven, tight trailing
+        if regime in ("TRENDING_UP", "TRENDING_DOWN"):
+            # Trends: let winners run far. BE only after a real 1.5R move.
+            breakeven_distance = sl_distance * 1.50
+            trail_activate_distance = sl_distance * 2.50
+            tight_activate_distance = sl_distance * 4.00
+            trail_distance = sl_distance * 1.00
+            tight_trail_distance = sl_distance * 0.75
+        elif regime == "VOLATILE":
+            # Volatile: fast moves, quick BE, tight trailing
+            breakeven_distance = sl_distance * 1.00
+            trail_activate_distance = sl_distance * 1.50
+            tight_activate_distance = sl_distance * 2.50
+            trail_distance = sl_distance * 0.50
+            tight_trail_distance = sl_distance * 0.30
+        else:
+            # RANGING: breakeven is DISABLED (set to 3R — never triggers
+            # in a range). Instead, trailing starts early at 1.0R.
+            # Trail at 1.0R with 0.75R distance = SL at +0.25R when
+            # price is at +1.0R. As price rises, trail follows.
+            # This captures oscillation profits without the BE death trap.
+            breakeven_distance = sl_distance * 3.00
+            trail_activate_distance = sl_distance * 1.00
+            tight_activate_distance = sl_distance * 2.00
+            trail_distance = sl_distance * 0.75
+            tight_trail_distance = sl_distance * 0.50
 
         breakeven_pct = (breakeven_distance / entry_price) * 100
         trail_activate_pct = (trail_activate_distance / entry_price) * 100
@@ -399,17 +422,24 @@ class AdaptiveParams:
         trail_distance_pct = max(trail_distance_pct, 0.3)
         tight_trail_pct = max(tight_trail_pct, 0.2)
 
+        # R-values for logging/diagnostics (match the regime-based thresholds above)
+        if regime in ("TRENDING_UP", "TRENDING_DOWN"):
+            r_vals = {"breakeven_r": 1.50, "trail_activate_r": 2.50,
+                      "tight_activate_r": 4.00, "trail_distance_r": 1.00, "tight_trail_r": 0.75}
+        elif regime == "VOLATILE":
+            r_vals = {"breakeven_r": 1.00, "trail_activate_r": 1.50,
+                      "tight_activate_r": 2.50, "trail_distance_r": 0.50, "tight_trail_r": 0.30}
+        else:
+            r_vals = {"breakeven_r": 3.00, "trail_activate_r": 1.00,
+                      "tight_activate_r": 2.00, "trail_distance_r": 0.75, "tight_trail_r": 0.50}
+
         return {
             "breakeven_pct": breakeven_pct,
             "trail_activate_pct": trail_activate_pct,
             "tight_activate_pct": tight_activate_pct,
             "trail_distance_pct": trail_distance_pct,
             "tight_trail_pct": tight_trail_pct,
-            "breakeven_r": 0.75,
-            "trail_activate_r": 2.00,
-            "tight_activate_r": 3.00,
-            "trail_distance_r": 0.75,
-            "tight_trail_r": 0.50,
+            **r_vals,
         }
 
     def _save_params(self):

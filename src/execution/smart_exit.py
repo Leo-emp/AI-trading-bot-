@@ -150,12 +150,13 @@ class SmartExitManager:
         # Phase transitions based on how much profit we have
         if state.phase == 1 and profit_pct >= be_pct:
             state.phase = 2
-            # BE PROTECTION: move SL to entry + 0.25R
-            # 0.25R buffer survives crypto volatility (0.10R was too tight)
-            be_buffer = state.initial_risk * 0.25
+            # BE PROTECTION: move SL to entry + 0.50R
+            # Lock in half an R when breakeven triggers — the trade has
+            # already proven directionality (moved 1.5R+ in trends)
+            be_buffer = state.initial_risk * 0.50
             new_sl = entry + be_buffer
             state.current_sl = new_sl
-            logger.info("Smart exit: %s -> phase 2 (BE at %.2f, +0.25R buffer)",
+            logger.info("Smart exit: %s -> phase 2 (BE at %.2f, +0.50R buffer)",
                        state.pair, new_sl)
 
         if state.phase == 2 and profit_pct >= trail_pct:
@@ -207,11 +208,11 @@ class SmartExitManager:
 
         if state.phase == 1 and profit_pct >= be_pct:
             state.phase = 2
-            # BE PROTECTION for shorts: move SL to entry - 0.25R
-            be_buffer = state.initial_risk * 0.25
+            # BE PROTECTION for shorts: move SL to entry - 0.50R
+            be_buffer = state.initial_risk * 0.50
             new_sl = entry - be_buffer
             state.current_sl = new_sl
-            logger.info("Smart exit: %s -> phase 2 (BE at %.2f, -0.25R buffer)",
+            logger.info("Smart exit: %s -> phase 2 (BE at %.2f, -0.50R buffer)",
                        state.pair, new_sl)
 
         if state.phase == 2 and profit_pct >= trail_pct:

@@ -35,11 +35,11 @@ class TestSmartExitBuy:
         assert state.phase == 1
 
     def test_phase2_breakeven_activation(self):
-        """At +0.2% profit, SL moves to entry + 0.25R buffer."""
+        """At +0.2% profit, SL moves to entry + 0.50R buffer."""
         state = self.mgr.update("pos1", 100.25)  # +0.25% > 0.2%
         assert state.phase == 2
-        # SL = entry + 0.25 * initial_risk (0.40) = 100.0 + 0.10 = 100.10
-        expected_sl = 100.0 + 0.25 * 0.40
+        # SL = entry + 0.50 * initial_risk (0.40) = 100.0 + 0.20 = 100.20
+        expected_sl = 100.0 + 0.50 * 0.40
         assert abs(state.current_sl - expected_sl) < 0.01
         assert state.is_closed is False
 
@@ -121,11 +121,11 @@ class TestSmartExitSell:
                          entry=100.0, sl=100.40, tp=99.20)
 
     def test_sell_breakeven(self):
-        """Short position: SL moves to entry - 0.25R buffer at +0.2% profit."""
+        """Short position: SL moves to entry - 0.50R buffer at +0.2% profit."""
         state = self.mgr.update("pos2", 99.75)  # -0.25% = profit for short
         assert state.phase == 2
-        # SL = entry - 0.25 * initial_risk (0.40) = 100.0 - 0.10 = 99.90
-        expected_sl = 100.0 - 0.25 * 0.40
+        # SL = entry - 0.50 * initial_risk (0.40) = 100.0 - 0.20 = 99.80
+        expected_sl = 100.0 - 0.50 * 0.40
         assert abs(state.current_sl - expected_sl) < 0.01
 
     def test_sell_trailing(self):

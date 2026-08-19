@@ -32,7 +32,7 @@ loop_interval_seconds: 30
 # Risk management — PROFIT-FIRST: fewer trades, bigger wins
 # Core change: let winners run 3R-5R instead of capping at 0.5R
 risk:
-  max_open_positions: 5              # more concurrent positions = more profit potential
+  max_open_positions: 8              # leverage means each position locks less cash
   max_daily_drawdown_pct: 3.0
   max_consecutive_losses: 4
   consecutive_loss_pause_minutes: 30
@@ -73,8 +73,8 @@ scaling:
   - min_balance: 50000
     name: professional
     max_risk_pct: 1.5
-    max_positions: 4
-    daily_trade_limit: 100
+    max_positions: 8
+    daily_trade_limit: 200
 
 # Protection layers — TIGHTENED
 protection:

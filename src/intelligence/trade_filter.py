@@ -203,11 +203,11 @@ class TradeFilter:
                 1 for pos in open_positions
                 if getattr(pos, "side", "").upper() == trade_direction.upper()
             )
-            if same_dir >= 4:
+            if same_dir >= 6:
                 return {
                     "pass": False,
                     "reason": (f"Already {same_dir} {trade_direction} positions. "
-                              f"Max 4 same direction."),
+                              f"Max 6 same direction."),
                     "filter": "direction_exposure",
                 }
 

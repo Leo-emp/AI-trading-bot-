@@ -93,10 +93,10 @@ futures:
   enabled: true
   margin_mode: "isolated"
   leverage_tiers:
-    low: 3           # <70% confidence
-    medium: 5        # 70%+ confidence
-    high: 10         # 80%+ confidence (4/5 brains)
-    max: 20          # 95%+ confidence (5/5 brains)
+    low: 2           # <70% confidence
+    medium: 3        # 70%+ confidence
+    high: 5          # 80%+ confidence
+    max: 10          # 95%+ confidence (full consensus)
   liquidation_buffer_pct: 2.0
 
 # Scheduling

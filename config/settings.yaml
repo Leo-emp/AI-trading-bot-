@@ -16,10 +16,11 @@ pairs:
   - DOT/USDT
   - NEAR/USDT
 
-# Fee structure (Binance with BNB discount)
+# Fee structure (Binance Futures — USDⓈ-M)
+# Leveraged positions trade on futures, not spot
 fees:
-  maker_rate: 0.00075  # 0.075% per side
-  taker_rate: 0.001    # 0.1% per side (never used — limit only)
+  maker_rate: 0.0002   # 0.02% per side (futures maker)
+  taker_rate: 0.0005   # 0.05% per side (futures taker)
   use_bnb_discount: true
 
 # Initial balance for paper trading

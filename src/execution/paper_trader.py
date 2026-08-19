@@ -56,7 +56,7 @@ class PaperTrader:
     """
 
     def __init__(self, initial_balance: float = 50.0,
-                 maker_fee_rate: float = 0.00075,
+                 maker_fee_rate: float = 0.0002,
                  min_order_size: float = 10.0,
                  max_positions: int = 3,
                  max_per_pair: int = 2,

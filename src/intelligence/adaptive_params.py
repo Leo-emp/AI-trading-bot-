@@ -377,41 +377,90 @@ class AdaptiveParams:
         sl_mult = self._sl_mult * regime_adj["sl"] * strat_adj["sl"]
         sl_distance = atr * sl_mult  # 1R in price terms
 
-        # REGIME-AWARE EXIT THRESHOLDS
-        # The old one-size-fits-all BE at 0.75R was killing every winner:
-        #   price moves 0.75R → BE triggers → SL at entry+0.25R →
-        #   normal retracement stops out for $11 profit.
-        # Meanwhile losses run full 1R ($80+). This is backwards.
+        # STRATEGY-FIRST EXIT PROFILES
+        # Different strategies need fundamentally different exit behavior:
         #
-        # Fix: different exit behavior per market type:
-        # RANGING: NO breakeven (it's a trap), use early trailing instead
-        # TRENDING: delayed breakeven at 1.5R (real move, not noise)
-        # VOLATILE: moderate breakeven, tight trailing
-        if regime in ("TRENDING_UP", "TRENDING_DOWN"):
-            # Trends: let winners run far. BE only after a real 1.5R move.
-            breakeven_distance = sl_distance * 1.50
-            trail_activate_distance = sl_distance * 2.50
-            tight_activate_distance = sl_distance * 4.00
-            trail_distance = sl_distance * 1.00
-            tight_trail_distance = sl_distance * 0.75
-        elif regime == "VOLATILE":
-            # Volatile: fast moves, quick BE, tight trailing
-            breakeven_distance = sl_distance * 1.00
-            trail_activate_distance = sl_distance * 1.50
-            tight_activate_distance = sl_distance * 2.50
+        # SCALP: grab quick profit, don't wait. Close at 1.0-1.5R.
+        #   → Fast BE at 0.5R, tight trailing at 1.0R, close fast.
+        #   → Expected: $200-500 wins in 5-30 minutes.
+        #
+        # MOMENTUM: ride the trend for big moves. Hold for 3-5R+.
+        #   → Delayed BE at 1.5R, wide trailing, patient.
+        #   → Expected: $1,000-5,000 wins over 1-12 hours.
+        #
+        # MEAN_REVERSION: moderate target, reversion to mean.
+        #   → Quick BE at 0.75R, moderate trailing at 1.5R.
+        #   → Expected: $300-800 wins in 15-60 minutes.
+        #
+        # GRID: managed by grid executor, but fallback exits here.
+        #   → Similar to ranging: early trail, no BE trap.
+        #
+        # Regime modifies within each strategy profile.
+
+        if strategy == "smart_scalp":
+            # SCALP: fast in, fast out. Grab 1.0-1.5R and leave.
+            breakeven_distance = sl_distance * 0.50   # BE early at 0.5R
+            trail_activate_distance = sl_distance * 0.75  # trail starts at 0.75R
+            tight_activate_distance = sl_distance * 1.50  # tighten at 1.5R
+            trail_distance = sl_distance * 0.30       # tight 0.3R trail
+            tight_trail_distance = sl_distance * 0.15 # very tight to lock profit
+            r_key = "scalp"
+
+        elif strategy == "momentum":
+            # MOMENTUM: let winners run far. Patient trailing.
+            if regime in ("TRENDING_UP", "TRENDING_DOWN"):
+                # Trend + momentum = maximum patience
+                breakeven_distance = sl_distance * 2.00   # BE only after 2R
+                trail_activate_distance = sl_distance * 3.00  # trail at 3R
+                tight_activate_distance = sl_distance * 5.00  # tighten at 5R
+                trail_distance = sl_distance * 1.50       # wide 1.5R trail
+                tight_trail_distance = sl_distance * 0.75 # moderate tighten
+            elif regime == "VOLATILE":
+                # Volatile momentum: faster exits but still patient
+                breakeven_distance = sl_distance * 1.50
+                trail_activate_distance = sl_distance * 2.00
+                tight_activate_distance = sl_distance * 3.50
+                trail_distance = sl_distance * 1.00
+                tight_trail_distance = sl_distance * 0.50
+            else:
+                # Ranging momentum: moderate
+                breakeven_distance = sl_distance * 1.00
+                trail_activate_distance = sl_distance * 1.50
+                tight_activate_distance = sl_distance * 2.50
+                trail_distance = sl_distance * 0.75
+                tight_trail_distance = sl_distance * 0.50
+            r_key = "momentum"
+
+        elif strategy == "mean_reversion":
+            # MEAN REVERSION: moderate target, revert to mean
+            breakeven_distance = sl_distance * 0.75
+            trail_activate_distance = sl_distance * 1.25
+            tight_activate_distance = sl_distance * 2.00
             trail_distance = sl_distance * 0.50
             tight_trail_distance = sl_distance * 0.30
+            r_key = "mean_rev"
+
         else:
-            # RANGING: breakeven is DISABLED (set to 3R — never triggers
-            # in a range). Instead, trailing starts early at 1.0R.
-            # Trail at 1.0R with 0.75R distance = SL at +0.25R when
-            # price is at +1.0R. As price rises, trail follows.
-            # This captures oscillation profits without the BE death trap.
-            breakeven_distance = sl_distance * 3.00
-            trail_activate_distance = sl_distance * 1.00
-            tight_activate_distance = sl_distance * 2.00
-            trail_distance = sl_distance * 0.75
-            tight_trail_distance = sl_distance * 0.50
+            # GRID / fallback: regime-aware defaults
+            if regime in ("TRENDING_UP", "TRENDING_DOWN"):
+                breakeven_distance = sl_distance * 1.50
+                trail_activate_distance = sl_distance * 2.50
+                tight_activate_distance = sl_distance * 4.00
+                trail_distance = sl_distance * 1.00
+                tight_trail_distance = sl_distance * 0.75
+            elif regime == "VOLATILE":
+                breakeven_distance = sl_distance * 1.00
+                trail_activate_distance = sl_distance * 1.50
+                tight_activate_distance = sl_distance * 2.50
+                trail_distance = sl_distance * 0.50
+                tight_trail_distance = sl_distance * 0.30
+            else:
+                breakeven_distance = sl_distance * 3.00
+                trail_activate_distance = sl_distance * 1.00
+                tight_activate_distance = sl_distance * 2.00
+                trail_distance = sl_distance * 0.75
+                tight_trail_distance = sl_distance * 0.50
+            r_key = "grid"
 
         breakeven_pct = (breakeven_distance / entry_price) * 100
         trail_activate_pct = (trail_activate_distance / entry_price) * 100
@@ -425,16 +474,15 @@ class AdaptiveParams:
         trail_distance_pct = max(trail_distance_pct, 0.3)
         tight_trail_pct = max(tight_trail_pct, 0.2)
 
-        # R-values for logging/diagnostics (match the regime-based thresholds above)
-        if regime in ("TRENDING_UP", "TRENDING_DOWN"):
-            r_vals = {"breakeven_r": 1.50, "trail_activate_r": 2.50,
-                      "tight_activate_r": 4.00, "trail_distance_r": 1.00, "tight_trail_r": 0.75}
-        elif regime == "VOLATILE":
-            r_vals = {"breakeven_r": 1.00, "trail_activate_r": 1.50,
-                      "tight_activate_r": 2.50, "trail_distance_r": 0.50, "tight_trail_r": 0.30}
-        else:
-            r_vals = {"breakeven_r": 3.00, "trail_activate_r": 1.00,
-                      "tight_activate_r": 2.00, "trail_distance_r": 0.75, "tight_trail_r": 0.50}
+        # R-values for logging/diagnostics (computed from actual thresholds)
+        r_vals = {
+            "breakeven_r": round(breakeven_distance / sl_distance, 2) if sl_distance > 0 else 0,
+            "trail_activate_r": round(trail_activate_distance / sl_distance, 2) if sl_distance > 0 else 0,
+            "tight_activate_r": round(tight_activate_distance / sl_distance, 2) if sl_distance > 0 else 0,
+            "trail_distance_r": round(trail_distance / sl_distance, 2) if sl_distance > 0 else 0,
+            "tight_trail_r": round(tight_trail_distance / sl_distance, 2) if sl_distance > 0 else 0,
+            "exit_profile": r_key,
+        }
 
         return {
             "breakeven_pct": breakeven_pct,

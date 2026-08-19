@@ -72,6 +72,10 @@ class PaperTrader:
         self._trade_history: list[Trade] = []
         self._total_trades = 0
         self._total_wins = 0
+        # Grid reserved balance — cash deducted for grid levels but not
+        # visible as positions. Engine updates this after grid activate/deactivate.
+        # Dashboard adds it back to equity so the P&L display is correct.
+        self._grid_reserved: float = 0.0
 
         # Try to restore saved state from disk
         self._load_state()
@@ -445,6 +449,9 @@ class PaperTrader:
                 "initial_balance": self._initial_balance,
                 "total_trades": self._total_trades,
                 "total_wins": self._total_wins,
+                # Grid reserved cash — deducted from balance but not a position.
+                # Dashboard adds this back to equity so P&L is correct.
+                "grid_reserved": self._grid_reserved,
                 "saved_at": time.time(),
                 "positions": [
                     {
@@ -480,6 +487,8 @@ class PaperTrader:
             self._initial_balance = state.get("initial_balance", self._initial_balance)
             self._total_trades = state.get("total_trades", 0)
             self._total_wins = state.get("total_wins", 0)
+            # Restore grid reserved amount (0 if state file is from before this field)
+            self._grid_reserved = state.get("grid_reserved", 0.0)
 
             for p in state.get("positions", []):
                 # Backward compat: old positions without leverage default to 1× (spot)

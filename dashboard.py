@@ -154,6 +154,10 @@ async def get_bot_data() -> dict:
     positions = state.get("positions", [])
     win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0
 
+    # Grid reserved cash — deducted from balance for grid levels but
+    # not visible as positions. Must be added back to equity.
+    grid_reserved = state.get("grid_reserved", 0)
+
     return {
         "balance": round(balance, 2),
         "initial_balance": round(initial, 2),
@@ -161,6 +165,7 @@ async def get_bot_data() -> dict:
         "total_wins": total_wins,
         "win_rate": round(win_rate, 1),
         "positions": positions,
+        "grid_reserved": round(grid_reserved, 2),
         "recent_trades": trades,
         "snapshots": snapshots,
         "timestamp": datetime.now(timezone.utc).isoformat(),

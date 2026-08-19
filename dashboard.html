@@ -747,7 +747,10 @@
                 }
             });
 
-            const equity = cash + totalMargin + unrealizedPnl;
+            // Grid reserved cash: deducted from balance for grid levels
+            // but not visible as positions — add it back so equity is correct
+            const gridReserved = botData.grid_reserved || 0;
+            const equity = cash + totalMargin + unrealizedPnl + gridReserved;
             const totalPnl = equity - initial;
             const pnlPct = (totalPnl / initial) * 100;
 

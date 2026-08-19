@@ -532,6 +532,9 @@ class TradingEngine:
                     if should_close:
                         balance_return, summary = self._grid_executor.deactivate_grid(pair, current_price)
                         self._trader._balance += balance_return
+                        # Update grid reserved so dashboard equity stays accurate
+                        self._trader._grid_reserved = self._grid_executor._reserved_balance
+                        self._trader._save_state()
                         logger.info("GRID DEACTIVATED | %s | %s | returned $%.2f to paper balance",
                                    pair, reason, balance_return)
                         await self._notifier.send_trade(
@@ -1119,6 +1122,9 @@ class TradingEngine:
         if grid_active and regime.regime != "RANGING":
             balance_return, summary = self._grid_executor.deactivate_grid(pair, current_price)
             self._trader._balance += balance_return
+            # Update grid reserved so dashboard equity stays accurate
+            self._trader._grid_reserved = self._grid_executor._reserved_balance
+            self._trader._save_state()
             logger.info("GRID → TREND switch | %s | regime=%s | %s | returned $%.2f",
                        pair, regime.regime, summary, balance_return)
             return False  # let directional pipeline take over
@@ -1188,6 +1194,9 @@ class TradingEngine:
 
         # Deduct reserved balance from paper trader
         self._trader._balance -= grid_state.reserved_balance
+        # Track grid reserved so dashboard can include it in equity
+        self._trader._grid_reserved = self._grid_executor._reserved_balance
+        self._trader._save_state()
 
         # Log grid activation details
         spacing_pct = self._grid_calculator.get_grid_spacing_pct(grid_state)

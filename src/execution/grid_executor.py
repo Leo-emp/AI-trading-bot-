@@ -103,6 +103,7 @@ class GridExecutor:
 
         grid_state.pair = pair
         grid_state.is_active = True
+        grid_state.activated_at = time.time()
         self._grids[pair] = grid_state
         self._reserved_balance += grid_state.reserved_balance
         # Each grid gets its own isolated cash pool

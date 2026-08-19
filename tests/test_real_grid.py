@@ -546,6 +546,101 @@ class TestGridExecutor:
         holding = sum(1 for l in grid.levels if l.is_holding)
         assert holding >= 3
 
+    def test_grid_staleness_detection(self):
+        """Grid is stale when BB center drifts > 50% of range width."""
+        import time as _time
+        calc = GridCalculator(num_levels=5, fee_rate=0.00075)
+        grid = GridState(
+            pair="BTC/USDT",
+            lower_bound=93000, upper_bound=97000,
+            levels=[], size_per_level=1000, is_active=True,
+            activated_at=_time.time() - 10800,  # 3 hours ago
+        )
+        # BB shifted from center 95000 to center 99000 (drift of 4000, range is 4000 → 100%)
+        stale, reason = calc.is_grid_stale(grid, new_bb_lower=97000, new_bb_upper=101000)
+        assert stale is True
+        assert "drifted" in reason
+
+    def test_grid_not_stale_when_young(self):
+        """Grids younger than 2 hours are never stale."""
+        import time as _time
+        calc = GridCalculator(num_levels=5, fee_rate=0.00075)
+        grid = GridState(
+            pair="BTC/USDT",
+            lower_bound=93000, upper_bound=97000,
+            levels=[], size_per_level=1000, is_active=True,
+            activated_at=_time.time() - 60,  # 1 minute ago
+        )
+        stale, _ = calc.is_grid_stale(grid, new_bb_lower=97000, new_bb_upper=101000)
+        assert stale is False
+
+    def test_grid_not_stale_when_bb_close(self):
+        """Grid is fine when BB hasn't shifted much."""
+        import time as _time
+        calc = GridCalculator(num_levels=5, fee_rate=0.00075)
+        grid = GridState(
+            pair="BTC/USDT",
+            lower_bound=93000, upper_bound=97000,
+            levels=[], size_per_level=1000, is_active=True,
+            activated_at=_time.time() - 10800,  # 3 hours ago
+        )
+        # BB shifted slightly (center 95000 → 95500 = 12.5% of 4000 range)
+        stale, _ = calc.is_grid_stale(grid, new_bb_lower=93500, new_bb_upper=97500)
+        assert stale is False
+
+    def test_grid_idle_timeout(self):
+        """Grid with 0 fills after 8 hours should close."""
+        import time as _time
+        calc = GridCalculator(num_levels=5, fee_rate=0.00075)
+        grid = GridState(
+            pair="BTC/USDT",
+            lower_bound=93000, upper_bound=97000,
+            levels=[], size_per_level=1000, is_active=True,
+            total_fills=0,
+            activated_at=_time.time() - 36000,  # 10 hours ago
+        )
+        idle, reason = calc.is_grid_idle(grid)
+        assert idle is True
+        assert "no fills" in reason
+
+    def test_grid_not_idle_with_fills(self):
+        """Grid with completed fills is never idle."""
+        import time as _time
+        calc = GridCalculator(num_levels=5, fee_rate=0.00075)
+        grid = GridState(
+            pair="BTC/USDT",
+            lower_bound=93000, upper_bound=97000,
+            levels=[], size_per_level=1000, is_active=True,
+            total_fills=3,
+            activated_at=_time.time() - 36000,  # 10 hours ago
+        )
+        idle, _ = calc.is_grid_idle(grid)
+        assert idle is False
+
+    def test_grid_not_idle_when_young(self):
+        """Young grids are never idle regardless of fills."""
+        import time as _time
+        calc = GridCalculator(num_levels=5, fee_rate=0.00075)
+        grid = GridState(
+            pair="BTC/USDT",
+            lower_bound=93000, upper_bound=97000,
+            levels=[], size_per_level=1000, is_active=True,
+            total_fills=0,
+            activated_at=_time.time() - 3600,  # 1 hour ago
+        )
+        idle, _ = calc.is_grid_idle(grid)
+        assert idle is False
+
+    def test_activated_at_set_on_activation(self):
+        """Grid executor sets activated_at timestamp."""
+        import time as _time
+        grid = self._make_grid()
+        before = _time.time()
+        self.executor.activate_grid("BTC/USDT", grid, paper_balance=100000)
+        after = _time.time()
+        assert grid.activated_at >= before
+        assert grid.activated_at <= after
+
     def test_open_exposure_tracking(self):
         grid = self._make_grid(lower=90000, upper=100000, num_levels=4,
                                size_per_level=1000)

@@ -18,6 +18,7 @@
 # - Grid pauses if BB width > 5.5% (too volatile)
 
 import logging
+import time
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,7 @@ class GridState:
     total_pnl: float = 0.0      # running P&L from completed grid fills
     total_fills: int = 0         # how many buy+sell cycles completed
     reserved_balance: float = 0.0  # USDT reserved from main balance
+    activated_at: float = 0.0      # timestamp when grid was activated
 
 
 class GridCalculator:
@@ -170,3 +172,44 @@ class GridCalculator:
         gross = grid.size_per_level * spacing_pct
         fees = grid.size_per_level * grid.fee_rate * 2  # entry + exit
         return gross - fees
+
+    def is_grid_stale(self, grid: GridState,
+                      new_bb_lower: float, new_bb_upper: float) -> tuple[bool, str]:
+        """Check if the grid's range has drifted too far from current BB.
+
+        A grid becomes stale when the BB center shifts by more than
+        50% of the grid's range width. This means the grid levels are
+        no longer aligned with where price is actually bouncing.
+        """
+        if not grid.is_active:
+            return False, ""
+
+        # Don't recalibrate grids younger than 2 hours
+        age_hours = (time.time() - grid.activated_at) / 3600
+        if age_hours < 2.0:
+            return False, "grid too young for recalibration"
+
+        grid_center = (grid.upper_bound + grid.lower_bound) / 2
+        grid_width = grid.upper_bound - grid.lower_bound
+        new_center = (new_bb_upper + new_bb_lower) / 2
+
+        center_drift = abs(new_center - grid_center)
+        drift_ratio = center_drift / grid_width if grid_width > 0 else 0
+
+        if drift_ratio > 0.5:
+            return True, (
+                f"BB center drifted {drift_ratio:.0%} of range "
+                f"(grid=${grid_center:.2f}, BB=${new_center:.2f})"
+            )
+        return False, ""
+
+    def is_grid_idle(self, grid: GridState,
+                     idle_hours: float = 8.0) -> tuple[bool, str]:
+        """Check if the grid has been active too long with zero fills."""
+        if not grid.is_active or grid.total_fills > 0:
+            return False, ""
+
+        age_hours = (time.time() - grid.activated_at) / 3600
+        if age_hours > idle_hours:
+            return True, f"no fills in {age_hours:.1f}h (limit {idle_hours:.0f}h)"
+        return False, ""

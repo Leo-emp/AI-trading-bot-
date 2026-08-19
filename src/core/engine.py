@@ -486,7 +486,8 @@ class TradingEngine:
                         if len(trs) >= 14:
                             atr = sum(trs[-14:]) / 14
 
-                    # Check all exit conditions: ATR breakout, max loss, fully loaded
+                    # Check all exit conditions: ATR breakout, max loss, fully loaded,
+                    # staleness (BB drift), idle timeout
                     should_close, reason = self._grid_calculator.should_close_grid(current_price, grid, atr)
 
                     if not should_close:
@@ -499,6 +500,32 @@ class TradingEngine:
                         if current_price <= grid.lower_bound:
                             should_close = True
                             reason = "fully loaded + price at/below lower bound"
+
+                    # Check if grid is stale (BB has drifted away from grid range)
+                    if not should_close:
+                        try:
+                            df_4h = await self._client.get_historical_ohlcv(pair, "4h", limit=50)
+                            if not df_4h.empty and len(df_4h) >= 25:
+                                df_4h = self._indicator_engine.compute_all(df_4h)
+                                latest_4h = df_4h.iloc[-1]
+                                new_bb_upper = float(latest_4h.get("bb_upper", 0))
+                                new_bb_lower = float(latest_4h.get("bb_lower", 0))
+                                if new_bb_upper > 0 and new_bb_lower > 0:
+                                    stale, stale_reason = self._grid_calculator.is_grid_stale(
+                                        grid, new_bb_lower, new_bb_upper,
+                                    )
+                                    if stale:
+                                        should_close = True
+                                        reason = f"STALE: {stale_reason}"
+                        except Exception as e:
+                            logger.debug("Staleness check failed for %s: %s", pair, e)
+
+                    # Check idle timeout (no fills after 8 hours)
+                    if not should_close:
+                        idle, idle_reason = self._grid_calculator.is_grid_idle(grid)
+                        if idle:
+                            should_close = True
+                            reason = f"IDLE: {idle_reason}"
 
                     if should_close:
                         balance_return, summary = self._grid_executor.deactivate_grid(pair, current_price)

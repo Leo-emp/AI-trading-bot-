@@ -332,7 +332,12 @@ class PaperTrader:
         return closed_trades
 
     def _take_partial_profit(self, pos: OpenPosition, current_price: float) -> Optional[Trade]:
-        """Close 25% of position at 2R profit. Banks 0.5R guaranteed."""
+        """Close 25% of position at 2R profit. Banks 0.5R guaranteed.
+
+        After partial, moves remaining SL to entry + 1R so the 75%
+        can never turn into a loss. This prevents the "win then bigger
+        loss" pattern that inflates win rate while draining balance.
+        """
         partial_qty = pos.quantity * 0.25
         if partial_qty * current_price < 5.0:
             return None
@@ -358,6 +363,28 @@ class PaperTrader:
         if pos.margin_locked > 0:
             pos.margin_locked *= 0.75
         pos.partial_taken = True
+
+        # CRITICAL: move SL to entry + 1R so remaining 75% is guaranteed profit.
+        # Without this, a reversal after partial creates a net loss:
+        # partial +0.5R win on 25% vs -1R loss on 75% = -0.25R net.
+        # With SL at +1R: worst case = partial +0.5R + remaining +0.75R = +1.25R net.
+        sl_distance = abs(pos.entry_price - pos.stop_loss)
+        if pos.side == "buy":
+            new_sl = pos.entry_price + sl_distance
+            if new_sl > pos.stop_loss:
+                logger.info(
+                    "PARTIAL SL UPGRADE | %s | SL moved $%.2f -> $%.2f (+1R lock)",
+                    pos.pair, pos.stop_loss, new_sl,
+                )
+                pos.stop_loss = new_sl
+        else:
+            new_sl = pos.entry_price - sl_distance
+            if new_sl < pos.stop_loss:
+                logger.info(
+                    "PARTIAL SL UPGRADE | %s | SL moved $%.2f -> $%.2f (-1R lock)",
+                    pos.pair, pos.stop_loss, new_sl,
+                )
+                pos.stop_loss = new_sl
 
         self._total_trades += 1
         if net_pnl > 0:

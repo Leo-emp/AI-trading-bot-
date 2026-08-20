@@ -40,7 +40,7 @@ risk:
   max_daily_trades: 50               # was 100 — quality over quantity
   min_balance_floor: 10.0
   balance_floor_pct: 70.0
-  max_position_pct: 20.0             # was 25.0 — cap single position exposure
+  max_position_pct: 15.0             # cap single position margin to 15% of balance
   risk_per_trade_pct: 1.0
   min_order_size: 10.0
   black_swan_pct: 5.0
@@ -94,10 +94,10 @@ futures:
   enabled: true
   margin_mode: "isolated"
   leverage_tiers:
-    low: 3           # <70% confidence — cautious
-    medium: 5        # 70%+ confidence
-    high: 10         # 80%+ confidence — multiple brains agree
-    max: 20          # 95%+ confidence — full consensus, max size
+    low: 2           # <70% confidence — cautious
+    medium: 3        # 70%+ confidence
+    high: 5          # 80%+ confidence — multiple brains agree
+    max: 10          # 95%+ confidence — full consensus, max size
   liquidation_buffer_pct: 2.0
 
 # Scheduling

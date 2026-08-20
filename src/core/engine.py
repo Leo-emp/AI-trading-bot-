@@ -270,7 +270,11 @@ class TradingEngine:
     async def _on_trade_closed(self, **kwargs):
         trade = kwargs.get("trade")
         if trade:
-            await self._db.save_trade(trade)
+            try:
+                await self._db.save_trade(trade)
+            except Exception as e:
+                logger.error("FAILED TO SAVE TRADE TO DB: %s | trade=%s %s pnl=$%.4f",
+                             e, trade.pair, trade.side, trade.pnl)
             # Record in performance tracker
             self._performance_tracker.record_trade(trade.strategy, trade.pnl)
             # Feed protection system — tracks consecutive losses + daily P&L
@@ -361,12 +365,23 @@ class TradingEngine:
                     # Update smart exit (4-phase: normal -> breakeven -> trail -> tight)
                     exit_state = self._smart_exit.update(pos_id, current_price)
                     if exit_state:
-                        if exit_state.current_sl != pos.stop_loss:
+                        # SL can only move in the favorable direction —
+                        # never overwrite a higher SL from partial close or
+                        # trailing stop with a lower value.
+                        if pos.side == "buy" and exit_state.current_sl > pos.stop_loss:
                             old_sl = pos.stop_loss
                             pos.stop_loss = exit_state.current_sl
                             logger.info(
-                                "SMART EXIT | %s %s | phase=%d | SL moved %.2f -> %.2f",
-                                pos.side.upper(), pos.pair, exit_state.phase,
+                                "SMART EXIT | %s BUY | phase=%d | SL moved %.2f -> %.2f",
+                                pos.pair, exit_state.phase,
+                                old_sl, pos.stop_loss,
+                            )
+                        elif pos.side == "sell" and exit_state.current_sl < pos.stop_loss:
+                            old_sl = pos.stop_loss
+                            pos.stop_loss = exit_state.current_sl
+                            logger.info(
+                                "SMART EXIT | %s SELL | phase=%d | SL moved %.2f -> %.2f",
+                                pos.pair, exit_state.phase,
                                 old_sl, pos.stop_loss,
                             )
 

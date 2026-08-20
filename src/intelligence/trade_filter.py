@@ -115,21 +115,11 @@ class TradeFilter:
                 "filter": "atr_floor",
             }
 
-        # --- Filter 0b: Trend alignment (PROVEN: 55-65% edge with trend) ---
-        # Only trade in the direction of the 1-hour trend.
-        # Trading against the trend is documented to lose 55-65% of the time.
-        hourly = self._hourly_trend.get(pair, "NEUTRAL")
-        if trade_direction and hourly != "NEUTRAL":
-            is_aligned = (
-                (trade_direction == "BUY" and hourly == "UP") or
-                (trade_direction == "SELL" and hourly == "DOWN")
-            )
-            if not is_aligned:
-                return {
-                    "pass": False,
-                    "reason": f"Against 1h trend: want {trade_direction} but 1h is {hourly}.",
-                    "filter": "trend_alignment",
-                }
+        # Trend alignment filter REMOVED — it was blocking ALL sell/short
+        # signals because the 1h trend is usually UP in crypto. This made the
+        # bot buy-only, so every market drop caused losses with no way to
+        # profit from the downside. The 5-brain consensus already evaluates
+        # direction; this filter was just overriding it.
 
         # --- Filter 1: Dead hours ---
         if now.hour in self._dead_hours:

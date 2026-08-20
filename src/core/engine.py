@@ -1058,6 +1058,20 @@ class TradingEngine:
                 reasons=gate_decision.reasons,
             )
 
+            # --- Step 8b: CONFLICT CHECK — no opposing positions on same pair ---
+            # BUY + SELL on the same pair cancels out: one wins, one loses,
+            # and both pay fees. Guaranteed net loss from fees alone.
+            existing = [p for p in self._trader.get_open_positions()
+                        if p.pair == pair]
+            for ep in existing:
+                if ep.side.upper() != direction:
+                    logger.info(
+                        "CONFLICT BLOCKED %s %s: already have %s position open. "
+                        "Would hedge and guarantee fee losses.",
+                        direction, pair, ep.side.upper(),
+                    )
+                    return
+
             # --- Step 9: Execute the trade (with futures leverage) ---
             trade = self._trader.execute_signal(signal, pair, position_size,
                                                 leverage=dynamic.leverage)

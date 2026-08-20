@@ -31,20 +31,20 @@ class TradeFilter:
     """
 
     def __init__(self,
-                 min_confidence: float = 0.50,
+                 min_confidence: float = 0.60,
                  max_spread_pct: float = 0.25,
-                 cooldown_minutes: int = 2,
+                 cooldown_minutes: int = 5,
                  max_correlated_positions: int = 5,
                  dead_hours_utc: Optional[list[int]] = None):
         # Minimum average confidence from agreeing brains
-        # 0.55 = let more trades through, gate already pre-filtered
+        # 0.60 = only genuine conviction trades, not coin flips
         self._min_confidence = min_confidence
 
         # Maximum bid-ask spread as % of price
         # 0.25% is generous — covers all 12 pairs on Binance
         self._max_spread_pct = max_spread_pct
 
-        # Minutes to wait after a losing trade — short, don't miss moves
+        # Minutes to wait after a losing trade — enough to avoid revenge trades
         self._cooldown_minutes = cooldown_minutes
 
         # Max positions in correlated assets — higher for more exposure

@@ -189,7 +189,8 @@ class AdaptiveParams:
         # triggers, the remaining 75% is guaranteed profit.
         #
         # Risk multiplier scales POSITION SIZE (more $ at risk):
-        #   <70% → 0.5× ($250 on $100K) — throwaway, just watching
+        #   <60% → SKIP (trade_filter blocks, but if it gets here: 0.25×)
+        #   60%  → 0.5× ($250 on $100K) — minimal participation
         #   70%  → 1.0× ($500) — standard
         #   80%  → 2.0× ($1,000) — strong conviction, double size
         #   90%+ → 3.0× ($1,500) — full consensus, triple size, max profit
@@ -199,15 +200,20 @@ class AdaptiveParams:
             risk_mult = 2.0
         elif confidence >= 0.70:
             risk_mult = 1.0
-        else:
+        elif confidence >= 0.60:
             risk_mult = 0.5
+        else:
+            risk_mult = 0.25
         risk_amount = balance * self._risk_pct * risk_mult
 
         # FUTURES LEVERAGE: confidence → leverage tier (AGGRESSIVE)
         # Leverage doesn't change $ risk (SL defines that). It changes
         # how much MARGIN is locked — high leverage = less cash tied up =
         # more positions possible = more upside exposure.
-        #   <70% → 1×  (spot-like, eats margin = natural position limiter)
+        # Min 2× even at low confidence — 1× locks full notional as margin,
+        # which traps $20K+ for a $250-risk trade and blocks better trades.
+        #   <60% → 2×  (minimum, still capital-efficient)
+        #   60%  → 3×  (low conviction)
         #   70%  → 5×  (moderate)
         #   80%  → 15× (strong — multiple brains agree, capital-efficient)
         #   90%+ → 25× (maximum conviction, minimum margin locked)
@@ -217,8 +223,10 @@ class AdaptiveParams:
             leverage = 15
         elif confidence >= 0.70:
             leverage = 5
+        elif confidence >= 0.60:
+            leverage = 3
         else:
-            leverage = 1
+            leverage = 2
 
         # Position size = risk / (distance to SL as fraction)
         if sl_pct > 0:

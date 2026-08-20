@@ -181,39 +181,44 @@ class AdaptiveParams:
             take_profit = round(entry_price - tp_distance, 8)
 
         # --- Step 6: CONFIDENCE-SCALED risk + LEVERAGE ---
-        # Base risk = 0.5% of balance. Conservative scaling — one bad
-        # high-confidence trade must not wipe out multiple small wins.
-        #   <70% → 1× ($500 on $100K) — cautious, small loss
-        #   70%  → 1.25× ($625) — moderate
-        #   80%  → 1.5× ($750) — strong
-        #   95%+ → 2× ($1,000) — full consensus, max size
-        # Old values (1/1.5/2.5/4) were too aggressive — a single 4× loss
-        # at 95% confidence wiped out 4 regular wins.
-        if confidence >= 0.95:
-            risk_mult = 2.0
+        # AGGRESSIVE WHEN SURE, TINY WHEN NOT.
+        # High confidence = multiple brains agree = bet big.
+        # Low confidence = uncertain = barely participate.
+        # The partial-close fix (SL → entry+1R after 2R partial) means
+        # big positions on high-confidence trades are SAFE — once partial
+        # triggers, the remaining 75% is guaranteed profit.
+        #
+        # Risk multiplier scales POSITION SIZE (more $ at risk):
+        #   <70% → 0.5× ($250 on $100K) — throwaway, just watching
+        #   70%  → 1.0× ($500) — standard
+        #   80%  → 2.0× ($1,000) — strong conviction, double size
+        #   90%+ → 3.0× ($1,500) — full consensus, triple size, max profit
+        if confidence >= 0.90:
+            risk_mult = 3.0
         elif confidence >= 0.80:
-            risk_mult = 1.5
+            risk_mult = 2.0
         elif confidence >= 0.70:
-            risk_mult = 1.25
-        else:
             risk_mult = 1.0
+        else:
+            risk_mult = 0.5
         risk_amount = balance * self._risk_pct * risk_mult
 
-        # FUTURES LEVERAGE: confidence → leverage tier (CONSERVATIVE)
-        # Risk capped by SL, but high leverage amplifies slippage and
-        # liquidation risk. 10x max keeps margin comfortable.
-        #   <70% → 2×  (cautious)
-        #   70%  → 3×  (moderate)
-        #   80%  → 5×  (strong — multiple brains agree)
-        #   95%+ → 10× (maximum — full consensus)
-        if confidence >= 0.95:
-            leverage = 10
+        # FUTURES LEVERAGE: confidence → leverage tier (AGGRESSIVE)
+        # Leverage doesn't change $ risk (SL defines that). It changes
+        # how much MARGIN is locked — high leverage = less cash tied up =
+        # more positions possible = more upside exposure.
+        #   <70% → 1×  (spot-like, eats margin = natural position limiter)
+        #   70%  → 5×  (moderate)
+        #   80%  → 15× (strong — multiple brains agree, capital-efficient)
+        #   90%+ → 25× (maximum conviction, minimum margin locked)
+        if confidence >= 0.90:
+            leverage = 25
         elif confidence >= 0.80:
-            leverage = 5
+            leverage = 15
         elif confidence >= 0.70:
-            leverage = 3
+            leverage = 5
         else:
-            leverage = 2
+            leverage = 1
 
         # Position size = risk / (distance to SL as fraction)
         if sl_pct > 0:
